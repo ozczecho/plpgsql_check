@@ -24,3 +24,4 @@ win32ver.rc
 lib*dll.def
 lib*.pc
 /results
+/solution/Release_x64
