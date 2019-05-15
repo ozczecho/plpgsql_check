@@ -336,6 +336,7 @@ plpgsql_profiler_function_tb(PG_FUNCTION_ARGS)
 /*
  * Displaying a function profile
  */
+PGDLLEXPORT
 Datum
 plpgsql_profiler_function_statements_tb(PG_FUNCTION_ARGS)
 {

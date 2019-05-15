@@ -608,7 +608,7 @@ init_tag(plpgsql_check_result_info *ri, Oid fn_oid)
 		}
 		else if (ri->format == PLPGSQL_CHECK_FORMAT_JSON) {
 			/* create a initial tag */
-			appendStringInfo(ri->sinfo, "{ \"function\":\"%d\",\n\"issues\":[\n", fn_oid);
+			appendStringInfo(ri->sinfo, "{\n    \"function\":\"%d\",\n    \"issue\":  {\n", fn_oid);
 		}
 	}
 }
@@ -631,7 +631,7 @@ close_and_save(plpgsql_check_result_info *ri)
 		if (ri->sinfo->len > 1 && ri->sinfo->data[ri->sinfo->len -1] == ',') {
 			ri->sinfo->data[ri->sinfo->len - 1] = '\n';
 		}
-		appendStringInfoString(ri->sinfo, "\n]\n}");
+		appendStringInfoString(ri->sinfo, "    }\n}");
 
 		put_text_line(ri, ri->sinfo->data, ri->sinfo->len);
 	}
@@ -716,18 +716,17 @@ format_error_json(StringInfo str,
 	initStringInfo(&sinfo);
 
 	/* flush tag */
-	appendStringInfoString(str, "  {\n");
-	appendStringInfo(str, "    \"level\":\"%s\",\n", level_str);
+	appendStringInfo(str, "        \"level\":\"%s\",\n", level_str);
 		
 	escape_json(&sinfo, message);
-	appendStringInfo(str, "    \"message\":%s,\n", sinfo.data);
+	appendStringInfo(str, "        \"message\":%s,\n", sinfo.data);
 	if (estate != NULL && estate->err_stmt != NULL)
-		appendStringInfo(str, "    \"statement\":{\n\"lineNumber\":\"%d\",\n\"text\":\"%s\"\n},\n",
+		appendStringInfo(str, "        \"statement\":{\n\"lineNumber\":\"%d\",\n\"text\":\"%s\"\n},\n",
 			estate->err_stmt->lineno,
 			plpgsql_stmt_typename(estate->err_stmt));
 
 	else if (strcmp(message, "unused declared variable") == 0)
-		appendStringInfo(str, "    \"statement\":{\n\"lineNumber\":\"%d\",\n\"text\":\"DECLARE\"\n},",
+	    appendStringInfo(str, "        \"statement\":{\n\"lineNumber\":\"%d\",\n\"text\":\"DECLARE\"\n},",
 			lineno);
 
 	if (hint != NULL) {
@@ -743,7 +742,7 @@ format_error_json(StringInfo str,
 	if (query != NULL) {
 		resetStringInfo(&sinfo);
 		escape_json(&sinfo, query);
-		appendStringInfo(str, "    \"query\":{\n\"position\":\"%d\",\n\"text\":%s\n},\n", position, sinfo.data);
+		appendStringInfo(str, "        \"query\":{\n\"position\":\"%d\",\n\"text\":%s\n},\n", position, sinfo.data);
 	}
 
 	if (context != NULL) {
@@ -753,10 +752,7 @@ format_error_json(StringInfo str,
 	}
 
 	/* placing this property last as to avoid a trailing comma*/
-	appendStringInfo(str, "    \"sqlState\":\"%s\"\n",	unpack_sql_state(sqlerrcode));
-
-	/* flush closing tag. Needs comman jus in case there is more than one issue. Comma removed in epilog */
-	appendStringInfoString(str, "  },");
+	appendStringInfo(str, "        \"sqlState\":\"%s\"\n", unpack_sql_state(sqlerrcode));
 }
 
 /*
