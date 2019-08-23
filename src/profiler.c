@@ -181,7 +181,7 @@ get_stmt_profile_next(profiler_iterator *pi)
 														 HASH_FIND,
 														 &found);
 
-			if (found)
+			if (!found)
 				elog(ERROR, "broken consistency of plpgsql_check profiler chunks");
 
 			pi->current_statement = 0;
@@ -611,13 +611,17 @@ profiler_touch_stmt(profiler_info *pinfo,
 		case PLPGSQL_STMT_FORC:
 		case PLPGSQL_STMT_DYNFORS:
 		case PLPGSQL_STMT_FOREACH_A:
+		case PLPGSQL_STMT_WHILE:
 			{
 				List   *stmts;
 
 				switch (PLPGSQL_STMT_TYPES stmt->cmd_type)
 				{
-					case PLPGSQL_STMT_LOOP:
+					case PLPGSQL_STMT_WHILE:
 						stmts = ((PLpgSQL_stmt_while *) stmt)->body;
+						break;
+					case PLPGSQL_STMT_LOOP:
+						stmts = ((PLpgSQL_stmt_loop *) stmt)->body;
 						break;
 					case PLPGSQL_STMT_FORI:
 						stmts = ((PLpgSQL_stmt_fori *) stmt)->body;
@@ -762,15 +766,13 @@ update_persistent_profile(profiler_info *pinfo, PLpgSQL_function *func)
 {
 	profiler_profile *profile = pinfo->profile;
 	profiler_hashkey hk;
-	profiler_stmt_chunk *chunk;
-	profiler_stmt_chunk *first_chunk = NULL;
+	profiler_stmt_chunk *chunk = NULL;
+	volatile profiler_stmt_chunk *chunk_with_mutex = NULL;
 	bool		found;
 	int			i;
 	int			stmt_counter = 0;
 	HTAB	   *chunks;
 	bool		shared_chunks;
-	bool		exclusive_lock = false;
-	volatile bool unlock_mutex = false;
 
 	if (shared_profiler_chunks_HashTable)
 	{
@@ -784,7 +786,7 @@ update_persistent_profile(profiler_info *pinfo, PLpgSQL_function *func)
 		shared_chunks = false;
 	}
 
-	profiler_init_hashkey(&hk, func);
+	profiler_init_hashkey(&hk, func) ;
 
 	/* don't need too strong lock for shared memory */
 	chunk = (profiler_stmt_chunk *) hash_search(chunks,
@@ -797,28 +799,20 @@ update_persistent_profile(profiler_info *pinfo, PLpgSQL_function *func)
 	{
 		LWLockRelease(profiler_ss->lock);
 		LWLockAcquire(profiler_ss->lock, LW_EXCLUSIVE);
-		exclusive_lock = true;
 
+		/* repeat searching under exclusive lock */
 		chunk = (profiler_stmt_chunk *) hash_search(chunks,
 												 (void *) &hk,
-												 HASH_ENTER,
+												 HASH_FIND,
 												 &found);
 	}
 
 	if (!found)
 	{
 		int		i;
-		int		stmt_counter;
 
-		/* first shared chunk is prepared already. local chunk should be done */
-		if (shared_chunks)
-		{
-			/* for first chunk we need to initialize mutex */
-			SpinLockInit(&chunk->mutex);
-			stmt_counter = 0;
-		}
-		else
-			stmt_counter = -1;
+		/* aftre increment first chunk will be created with chunk number 1 */
+		hk.chunk_num = 0;
 
 		/* we should to enter empty chunks first */
 		for (i = 0; i < profile->nstatements; i++)
@@ -826,9 +820,7 @@ update_persistent_profile(profiler_info *pinfo, PLpgSQL_function *func)
 			profiler_stmt_reduced *prstmt;
 			profiler_stmt *pstmt = &pinfo->stmts[i];
 
-			hk.chunk_num = 0;
-
-			if (stmt_counter == -1 || stmt_counter >= STATEMENTS_PER_CHUNK)
+			if (hk.chunk_num == 0 || stmt_counter >= STATEMENTS_PER_CHUNK)
 			{
 				hk.chunk_num += 1;
 
@@ -839,6 +831,9 @@ update_persistent_profile(profiler_info *pinfo, PLpgSQL_function *func)
 
 				if (found)
 					elog(ERROR, "broken consistency of plpgsql_check profiler chunks");
+
+				if (hk.chunk_num == 1 && shared_chunks)
+					SpinLockInit(&chunk->mutex);
 
 				stmt_counter = 0;
 			}
@@ -865,12 +860,14 @@ update_persistent_profile(profiler_info *pinfo, PLpgSQL_function *func)
 	/* if we have not exclusive lock, we should to lock first chunk */
 	PG_TRY();
 	{
-		if (shared_chunks && !exclusive_lock)
+		if (shared_chunks)
 		{
-			first_chunk = chunk;
-			SpinLockAcquire(&first_chunk->mutex);
-			unlock_mutex = true;
+			chunk_with_mutex = chunk;
+			SpinLockAcquire(&chunk_with_mutex->mutex);
 		}
+
+		hk.chunk_num = 1;
+		stmt_counter = 0;
 
 		/* there is a profiler chunk already */
 		for (i = 0; i < profile->nstatements; i++)
@@ -896,7 +893,7 @@ update_persistent_profile(profiler_info *pinfo, PLpgSQL_function *func)
 			prstmt = &chunk->stmts[stmt_counter++];
 
 			if (prstmt->lineno != pstmt->lineno)
-				elog(ERROR, "broken consistency of plpgsql_check profiler chunks");
+				elog(ERROR, "broken consistency of plpgsql_check profiler chunks %d %d", prstmt->lineno, pstmt->lineno);
 
 			if (prstmt->us_max < pstmt->us_max)
 				prstmt->us_max = pstmt->us_max;
@@ -908,14 +905,14 @@ update_persistent_profile(profiler_info *pinfo, PLpgSQL_function *func)
 	}
 	PG_CATCH();
 	{
-		if (unlock_mutex)
-			SpinLockRelease(&first_chunk->mutex);
+		if (chunk_with_mutex)
+			SpinLockRelease(&chunk_with_mutex->mutex);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
-	if (unlock_mutex)
-		SpinLockRelease(&first_chunk->mutex);
+	if (chunk_with_mutex)
+		SpinLockRelease(&chunk_with_mutex->mutex);
 
 	if (shared_chunks)
 		LWLockRelease(profiler_ss->lock);
@@ -944,17 +941,17 @@ profiler_update_map(profiler_profile *profile, PLpgSQL_stmt *stmt)
 		int		i;
 
 		/* calculate new size of map */
-		for (lines = profile->stmts_map_max_lineno; stmt->lineno < lines;)
+		for (lines = profile->stmts_map_max_lineno; lineno > lines;)
 			if (lines < 10000)
 				lines *= 2;
 			else
 				lines += 10000;
 
-		profile->stmts_map = realloc(profile->stmts_map,
-									 lines * sizeof(profiler_map_entry));
+		profile->stmts_map = repalloc(profile->stmts_map,
+									 (lines + 1) * sizeof(profiler_map_entry));
 
-		for (i = profile->stmts_map_max_lineno; i < lines; i++)
-			profile->stmts_map[i].stmt = NULL;
+		for (i = profile->stmts_map_max_lineno + 1; i <= lines; i++)
+			memset(&profile->stmts_map[i], 0, sizeof(profiler_map_entry));
 
 		profile->stmts_map_max_lineno = lines;
 	}
@@ -1007,14 +1004,14 @@ profiler_get_stmtid(profiler_profile *profile, PLpgSQL_stmt *stmt)
 
 	/* pme->stmt should not be null */
 	if (!pme->stmt)
-		elog(ERROR, "broken statement map - broken format");
+		elog(ERROR, "broken statement map - broken format on line: %d", lineno);
 
 	while (pme && pme->stmt != stmt)
 		pme = pme->next;
 
 	/* we should to find statement */
 	if (!pme)
-		elog(ERROR, "broken statement map - cannot to find statement");
+		elog(ERROR, "broken statement map - cannot to find statement on line: %d", lineno);
 
 	return pme->stmtid;
 
@@ -1169,7 +1166,7 @@ plpgsql_check_profiler_show_profile_statements(plpgsql_check_result_info *ri,
 			profile->nstatements = 0;
 			profile->stmts_map_max_lineno = 200;
 
-			profile->stmts_map = palloc0(profile->stmts_map_max_lineno * sizeof(profiler_map_entry));
+			profile->stmts_map = palloc0((profile->stmts_map_max_lineno + 1) * sizeof(profiler_map_entry));
 
 #else
 
@@ -1282,11 +1279,20 @@ plpgsql_check_profiler_show_profile(plpgsql_check_result_info *ri,
 
 			if (chunk)
 			{
-				/* skip invisible statements if any */
-				while (chunk->stmts[current_statement].lineno < lineno)
-				{
-					current_statement += 1;
+				ArrayBuildState *max_time_abs = NULL;
+				ArrayBuildState *processed_rows_abs = NULL;
 
+#if PG_VERSION_NUM >= 90500
+
+				max_time_abs = initArrayResult(FLOAT8OID, CurrentMemoryContext, true);
+				processed_rows_abs = initArrayResult(INT8OID, CurrentMemoryContext, true);
+
+#endif
+
+				/* process all statements on this line */
+				for(;;)
+				{
+					/* ensure so  access to chunks is correct */
 					if (current_statement >= STATEMENTS_PER_CHUNK)
 					{
 						hk.chunk_num += 1;
@@ -1304,54 +1310,23 @@ plpgsql_check_profiler_show_profile(plpgsql_check_result_info *ri,
 
 						current_statement = 0;
 					}
-				}
 
-				if (chunk && chunk->stmts[current_statement].lineno == lineno)
-				{
-					ArrayBuildState *max_time_abs = NULL;
-					ArrayBuildState *processed_rows_abs = NULL;
+					Assert(chunk != NULL);
 
-#if PG_VERSION_NUM >= 90500
-
-					max_time_abs = initArrayResult(FLOAT8OID, CurrentMemoryContext, true);
-					processed_rows_abs = initArrayResult(INT8OID, CurrentMemoryContext, true);
-
-#endif
-
-					stmt_lineno = lineno;
-
-					/* try to collect all statements on the line */
-					while (chunk->stmts[current_statement].lineno == lineno)
+					/* skip invisible statements if any */
+					if (chunk->stmts[current_statement].lineno < lineno)
 					{
-						profiler_stmt_reduced *prstmt;
-
-						if (current_statement >= STATEMENTS_PER_CHUNK)
-						{
-							hk.chunk_num += 1;
-
-							chunk = (profiler_stmt_chunk *) hash_search(chunks,
-															 (void *) &hk,
-															 HASH_FIND,
-															 &found);
-
-							if (!found)
-							{
-								chunk = NULL;
-								break;
-							}
-
-							current_statement = 0;
-						}
-
-						if (!chunk)
-							break;
-
-						prstmt = &chunk->stmts[current_statement];
+						current_statement += 1;
+						continue;
+					}
+					else if (chunk->stmts[current_statement].lineno == lineno)
+					{
+						profiler_stmt_reduced *prstmt = &chunk->stmts[current_statement];
 
 						us_total += prstmt->us_total;
 						exec_count += prstmt->exec_count;
 
-						cmds_on_row += 1;
+						stmt_lineno = lineno;
 
 						max_time_abs = accumArrayResult(max_time_abs,
 														Float8GetDatum(prstmt->us_max / 1000.0), false,
@@ -1362,10 +1337,18 @@ plpgsql_check_profiler_show_profile(plpgsql_check_result_info *ri,
 															 Int64GetDatum(prstmt->rows), false,
 															 INT8OID,
 															 CurrentMemoryContext);
+						cmds_on_row += 1;
+
 
 						current_statement += 1;
+						continue;
 					}
+					else
+						break;
+				}
 
+				if (cmds_on_row > 0)
+				{
 					max_time_array = makeArrayResult(max_time_abs, CurrentMemoryContext);
 					processed_rows_array = makeArrayResult(processed_rows_abs, CurrentMemoryContext);
 				}
@@ -1438,7 +1421,7 @@ plpgsql_check_profiler_func_init(PLpgSQL_execstate *estate, PLpgSQL_function *fu
 			profile->nstatements = 0;
 			profile->stmts_map_max_lineno = 200;
 
-			profile->stmts_map = palloc0(profile->stmts_map_max_lineno * sizeof(profiler_map_entry));
+			profile->stmts_map = palloc0((profile->stmts_map_max_lineno + 1) * sizeof(profiler_map_entry));
 
 #else
 
