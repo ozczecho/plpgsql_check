@@ -25,3 +25,4 @@ lib*dll.def
 lib*.pc
 /results
 /solution/Release_x64
+/Release_x64

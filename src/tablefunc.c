@@ -57,6 +57,7 @@ init_check_info(plpgsql_check_info *cinfo, Oid fn_oid)
  * Extended check with formatted text output
  *
  */
+PGDLLEXPORT
 Datum
 plpgsql_check_function(PG_FUNCTION_ARGS)
 {
@@ -152,6 +153,7 @@ plpgsql_check_function(PG_FUNCTION_ARGS)
  * It ensure a detailed validation and returns result as multicolumn table
  *
  */
+PGDLLEXPORT
 Datum
 plpgsql_check_function_tb(PG_FUNCTION_ARGS)
 {
@@ -242,6 +244,7 @@ plpgsql_check_function_tb(PG_FUNCTION_ARGS)
  * Prepare tuplestore and start check function in mode dependency detection
  *
  */
+PGDLLEXPORT
 Datum
 plpgsql_show_dependency_tb(PG_FUNCTION_ARGS)
 {
@@ -290,6 +293,7 @@ plpgsql_show_dependency_tb(PG_FUNCTION_ARGS)
 /*
  * Displaying a function profile
  */
+PGDLLEXPORT
 Datum
 plpgsql_profiler_function_tb(PG_FUNCTION_ARGS)
 {
