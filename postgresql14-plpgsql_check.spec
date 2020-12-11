@@ -1,9 +1,9 @@
-%global pgmajorversion 94
-%global pginstdir /usr/pgsql-9.4
+%global pgmajorversion 13
+%global pginstdir /usr/pgsql-13
 %global sname plpgsql_check
 
 Name:		%{sname}_%{pgmajorversion}
-Version:	1.7.4
+Version:	1.15.1
 Release:	1%{?dist}
 Summary:	Additional tools for plpgsql functions validation
 
@@ -47,6 +47,45 @@ rm -rf %{buildroot}
 %{pginstdir}/share/extension/plpgsql_check.control
 
 %changelog
+* Mon Nov 16 2020 - Pavel Stehule <pavel.stehule@gmail.com> 1.14.0
+- queryid can be displayed in profiler's reports (Julien Rouhaud)
+- new profiler's GUC plpgsql_check.profiler_max_shared_chunks (Julien Rouhaud)
+- few minor bugfixes
+
+* Fri Aug 14 2020 - Pavel Stehule <pavel.stehule@gmail.com> 1.13.0
+- tracer
+- pragma support to control checks, warnings and tracing
+
+* Thu Jul 2 2020 -  Pavel STEHULE <pavel.stehule@gmail.com> 1.11.0
+- possibility to check functions with arguments of polymorphic type
+- possibility to specify type used as real type instead polymorphic type
+
+* Fri Jun 05 2020 - Pavel STEHULE <pavel.stehule@gmail.com> 1.10.0
+- deduction record type structure from result of polymorphic function
+
+* Mon Apr 27 2020 - Pavel STEHULE <pavel.stehule@gmail.com> 1.9.1
+- minor bugfixes
+
+* Mon Mar 30 2020 - Pavel STEHULE <pavel.stehule@gmail.com> 1.9.0
+- statement and branch coverage metrics
+- remove support for Postgres 9.4
+
+* Mon Jan 06 2020 - Pavel STEHULE <pavel.stehule@gmail.com> 1.8.2
+- fix of compilation issue
+
+* Sun Jan 05 2020 - Pavel STEHULE <pavel.stehule@gmail.com> 1.8.1
+- cleaner detection function oid from name or signature
+
+* Sun Dec 29 2019 - Pavel STEHULE <pavel.stehule@gmail.com> 1.8.0
+- use Postgres tool for calling functions from plpgsql library instead dynamic linking
+- it solve issues related to dependency plpgsq_check on plpgsql
+
+* Mon Sep 23 2019 - Pavel STEHULE <pavel.stehule@gmail.com> 1.7.6
+- fix false alarm - multiple plans in EXECUTE statement, and possible crash
+
+* Tue Sep 10 2019 - Pavel STEHULE <pavel.stehule@gmail.com> 1.7.5
+- allow some work on tables with rules
+
 * Wed Jul 24 2019 - Pavel STEHULE <pavel.stehule@gmail.com> 1.7.3
 - profiler bugfixes
 

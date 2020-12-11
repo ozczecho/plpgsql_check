@@ -4,7 +4,7 @@
  *
  *			  assign types to record variables
  *
- * by Pavel Stehule 2013-2018
+ * by Pavel Stehule 2013-2020
  *
  *-------------------------------------------------------------------------
  */
@@ -42,7 +42,28 @@ plpgsql_check_record_variable_usage(PLpgSQL_checkstate *cstate, int dno, bool wr
 		if (!write)
 			cstate->used_variables = bms_add_member(cstate->used_variables, dno);
 		else
+		{
 			cstate->modif_variables = bms_add_member(cstate->modif_variables, dno);
+
+			/* raise extra warning when protected variable is modified */
+			if (bms_is_member(dno, cstate->protected_variables))
+			{
+				PLpgSQL_variable *var = (PLpgSQL_variable *) cstate->estate->datums[dno];
+				StringInfoData message;
+
+				initStringInfo(&message);
+
+				appendStringInfo(&message, "auto varible \"%s\" should not be modified by user", var->refname);
+				plpgsql_check_put_error(cstate,
+						  0, var->lineno,
+						  message.data,
+						  NULL,
+						  NULL,
+						  PLPGSQL_CHECK_WARNING_EXTRA,
+						  0, NULL, NULL);
+				pfree(message.data);
+			}
+		}
 	}
 }
 
@@ -103,33 +124,7 @@ plpgsql_check_target(PLpgSQL_checkstate *cstate, int varno, Oid *expected_typoid
 			{
 				PLpgSQL_rec *rec = (PLpgSQL_rec *) target;
 
-#if PG_VERSION_NUM >= 110000
-
-				if (rec->rectypeid != RECORDOID)
-				{
-					if (expected_typoid != NULL)
-						*expected_typoid = rec->rectypeid;
-					if (expected_typmod != NULL)
-						*expected_typmod = -1;
-				}
-				else
-
-#endif
-
-				if (recvar_tupdesc(rec) != NULL)
-				{
-					if (expected_typoid != NULL)
-						*expected_typoid = recvar_tupdesc(rec)->tdtypeid;
-					if (expected_typmod != NULL)
-						*expected_typmod = recvar_tupdesc(rec)->tdtypmod;
-				}
-				else
-				{
-					if (expected_typoid != NULL)
-						*expected_typoid = RECORDOID;
-					if (expected_typmod != NULL)
-						*expected_typmod = -1;
-				}
+				plpgsql_check_recvar_info(rec, expected_typoid, expected_typmod);
 			}
 			break;
 
@@ -233,15 +228,7 @@ plpgsql_check_target(PLpgSQL_checkstate *cstate, int varno, Oid *expected_typoid
 				 * If target is domain over array, reduce to base type
 				 */
 
-#if PG_VERSION_NUM >= 90600
-
-				arraytypeid = plpgsql_exec_get_datum_type(cstate->estate, target);
-
-#else
-
-				arraytypeid = exec_get_datum_type(cstate->estate, target);
-
-#endif
+				arraytypeid = plpgsql_check__exec_get_datum_type_p(cstate->estate, target);
 				arraytypeid = getBaseType(arraytypeid);
 
 				arrayelemtypeid = get_element_type(arraytypeid);
@@ -277,24 +264,12 @@ plpgsql_check_assign_to_target_type(PLpgSQL_checkstate *cstate,
 									Oid value_typoid,
 									bool isnull)
 {
+	/* not used yet */
+	(void) target_typmod;
 
 	/* the overhead UNKONWNOID --> TEXT is low */
 	if (target_typoid == TEXTOID && value_typoid == UNKNOWNOID)
 		return;
-
-#if PG_VERSION_NUM < 90500
-
-	/* any used typmod enforces IO cast - performance warning for older than 9.5*/
-	if (target_typmod != -1)
-		plpgsql_check_put_error(cstate,
-					  ERRCODE_DATATYPE_MISMATCH, 0,
-					  "target type has type modificator",
-					  NULL,
-					  "Usage of type modificator enforces slower IO casting.",
-					  PLPGSQL_CHECK_WARNING_PERFORMANCE,
-					  0, NULL, NULL);
-
-#endif
 
 	if (type_is_rowtype(value_typoid))
 		plpgsql_check_put_error(cstate,
@@ -715,6 +690,9 @@ plpgsql_check_recval_assign_tupdesc(PLpgSQL_checkstate *cstate, PLpgSQL_rec *rec
 
 	bool	   *nulls;
 	HeapTuple	tup;
+
+	(void) cstate;
+	(void) is_null;
 
 	plpgsql_check_recval_release(rec);
 

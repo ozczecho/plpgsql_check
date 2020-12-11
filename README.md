@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.com/okbob/plpgsql_check.svg?branch=master)](https://travis-ci.com/okbob/plpgsql_check)
+
 plpgsql_check
 =============
 
@@ -23,20 +25,18 @@ google group.
 * possibility to collect relations and functions used by function
 * possibility to check EXECUTE stmt agaist SQL injection vulnerability
 
-I invite any ideas, patches, bugreports
+I invite any ideas, patches, bugreports.
 
 plpgsql_check is next generation of plpgsql_lint. It allows to check source code by explicit call
 <i>plpgsql_check_function</i>.
 
-PostgreSQL PostgreSQL 9.4, 9.5, 9.6, 10, 11 are supported (Develop 12 is supported too).
+PostgreSQL PostgreSQL 9.5, 9.6, 10, 11, 12 and 13 are supported.
 
 The SQL statements inside PL/pgSQL functions are checked by validator for semantic errors. These errors
 can be found by plpgsql_check_function:
 
 # Active mode
 
-    postgres=# load 'plpgsql'; -- 1.1 and higher doesn't need it
-    LOAD
     postgres=# CREATE EXTENSION plpgsql_check;
     LOAD
     postgres=# CREATE TABLE t1(a int, b int);
@@ -94,7 +94,7 @@ can be found by plpgsql_check_function:
     9       $function$
 
 
-Function plpgsql_check_function() has two possible formats: text or xml
+Function plpgsql_check_function() has three possible formats: text, json or xml
 
     select * from plpgsql_check_function('f1()', fatal_errors := false);
                              plpgsql_check_function                         
@@ -146,7 +146,7 @@ You can set level of warnings via function's parameters:
 
 * `extra_warnings boolean DEFAULT true` - show warnings like missing `RETURN`,
   shadowed variables, dead code, never read (unused) function's parameter,
-  unmodified variables, ..
+  unmodified variables, modified auto variables, ..
 
 * `performance_warnings boolean DEFAULT false` - performance related warnings like
   declared type with type modificator, casting, implicit casts in where clause (can be
@@ -154,6 +154,20 @@ You can set level of warnings via function's parameters:
 
 * `security_warnings boolean DEFAULT false` - security related checks like SQL injection
   vulnerability detection
+
+* `anyelementtype regtype DEFAULT 'int'` - a real type used instead anyelement type
+
+* `anyenumtype regtype DEFAULT '-'` - a real type used instead anyenum type
+
+* `anyrangetype regtype DEFAULT 'int4range'` - a real type used instead anyrange type
+
+* `anycompatibletype DEFAULT 'int'` - a real type used instead anycompatible type
+
+* `anycompatiblerangetype DEFAULT 'int4range'` - a real type used instead anycompatible range type
+
+* `without_warnings DEFAULT false` - disable all warnings
+
+* `all_warnings DEFAULT false` - enable all warnings
 
 ## Triggers
 
@@ -416,6 +430,38 @@ Due dependencies, `shared_preload_libraries` should to contains `plpgsql` first
 The profiler is active when GUC `plpgsql_check.profiler` is on. The profiler doesn't require shared memory,
 but if there are not shared memory, then the profile is limmitted just to active session.
 
+When plpgsql_check is initialized by `shared_preload_libraries`, another GUC is
+available to configure the amount of shared memory used by the profiler:
+`plpgsql_check.profiler_max_shared_chunks`.  This defines the maximum number of
+statements chunk that can be stored in shared memory.  For each plpgsql
+function (or procedure), the whole content is split into chunks of 30
+statements.  If needed, multiple chunks can be used to store the whole content
+of a single function.  A single chunk is 1704 bytes.  The default value for
+this GUC is 15000, which should be enough for big projects containing hundred
+of thousands of statements in plpgsql, and will consume about 24MB of memory.
+If your project doesn't require that much number of chunks, you can set this
+parameter to a smaller number in order to decrease the memory usage.  The
+minimum value is 50 (which should consume about 83kB of memory), and the
+maximum value is 100000 (which should consume about 163MB of memory).  Changing
+this parameter requires a PostgreSQL restart.
+
+The profiler will also retrieve the query identifier for each instruction that
+contains an expression or optimizable statement.  Note that this requires
+pg_stat_statements, or another similar third-party extension), to be installed.
+There are some limitations to the query identifier retrieval:
+
+* if a plpgsql expression contains underlying statements, only the top level
+  query identifier will be retrieved
+* the profiler doesn't compute query identifier by itself but relies on
+  external extension, such as pg_stat_statements, for that.  It means that
+  depending on the external extension behavior, you may not be able to see a
+  query identifier for some statements.  That's for instance the case with DDL
+  statements, as pg_stat_statements doesn't expose the query identifier for
+  such queries.
+* a query identifier is retrieved only for instructions containing
+  expressions.  This means that plpgsql_profiler_function_tb() function can
+  report less query identifier than instructions on a single line.
+
 Attention: A update of shared profiles can decrease performance on servers under higher load.
 
 The profile can be displayed by function `plpgsql_profiler_function_tb`:
@@ -470,6 +516,13 @@ The profile per statements (not per line) can be displayed by function plpgsql_p
 There are two functions for cleaning stored profiles: `plpgsql_profiler_reset_all()` and
 `plpgsql_profiler_reset(regprocedure)`.
 
+## Coverage metrics
+
+plpgsql_check provides two functions:
+
+* `plpgsql_coverage_statements(name)`
+* `plpgsql_coverage_branches(name)`
+
 ## Note
 
 There is another very good PLpgSQL profiler - https://bitbucket.org/openscg/plprofiler
@@ -484,6 +537,160 @@ Both extensions can be used together with buildin PostgreSQL's feature - trackin
     set track_functions to 'pl';
     ...
     select * from pg_stat_user_functions;
+
+# Tracer
+
+plpgsql_check provides a tracing possibility - in this mode you can see notices on
+start or end functions (terse and default verbosity) and start or end statements
+(verbose verbosity). For default and verbose verbosity the content of function arguments
+is displayed. The content of related variables are displayed when verbosity is verbose.
+
+    postgres=# do $$ begin perform fx(10,null, 'now', e'stěhule'); end; $$;
+    NOTICE:  #0 ->> start of inline_code_block (Oid=0)
+    NOTICE:  #2   ->> start of function fx(integer,integer,date,text) (Oid=16405)
+    NOTICE:  #2        call by inline_code_block line 1 at PERFORM
+    NOTICE:  #2       "a" => '10', "b" => null, "c" => '2020-08-03', "d" => 'stěhule'
+    NOTICE:  #4     ->> start of function fx(integer) (Oid=16404)
+    NOTICE:  #4          call by fx(integer,integer,date,text) line 1 at PERFORM
+    NOTICE:  #4         "a" => '10'
+    NOTICE:  #4     <<- end of function fx (elapsed time=0.098 ms)
+    NOTICE:  #2   <<- end of function fx (elapsed time=0.399 ms)
+    NOTICE:  #0 <<- end of block (elapsed time=0.754 ms)
+
+The number after `#` is a execution frame counter (this number is related to deep of error context stack).
+It allows to pair start end and of function.
+
+Tracing is enabled by setting `plpgsql_check.tracer` to `on`. Attention - enabling this behaviour
+has significant negative impact on performance (unlike the profiler). You can set a level for output used by
+tracer `plpgsql_check.tracer_errlevel` (default is `notice`). The output content is limited by length
+specified by `plpgsql_check.tracer_variable_max_length` configuration variable.
+
+In terse verbose mode the output is reduced:
+
+    postgres=# set plpgsql_check.tracer_verbosity TO terse;
+    SET
+    postgres=# do $$ begin perform fx(10,null, 'now', e'stěhule'); end; $$;
+    NOTICE:  #0 start of inline code block (oid=0)
+    NOTICE:  #2 start of fx (oid=16405)
+    NOTICE:  #4 start of fx (oid=16404)
+    NOTICE:  #4 end of fx
+    NOTICE:  #2 end of fx
+    NOTICE:  #0 end of inline code block
+
+In verbose mode the output is extended about statement details:
+
+    postgres=# do $$ begin perform fx(10,null, 'now', e'stěhule'); end; $$;
+    NOTICE:  #0            ->> start of block inline_code_block (oid=0)
+    NOTICE:  #0.1       1  --> start of PERFORM
+    NOTICE:  #2              ->> start of function fx(integer,integer,date,text) (oid=16405)
+    NOTICE:  #2                   call by inline_code_block line 1 at PERFORM
+    NOTICE:  #2                  "a" => '10', "b" => null, "c" => '2020-08-04', "d" => 'stěhule'
+    NOTICE:  #2.1       1    --> start of PERFORM
+    NOTICE:  #2.1                "a" => '10'
+    NOTICE:  #4                ->> start of function fx(integer) (oid=16404)
+    NOTICE:  #4                     call by fx(integer,integer,date,text) line 1 at PERFORM
+    NOTICE:  #4                    "a" => '10'
+    NOTICE:  #4.1       6      --> start of assignment
+    NOTICE:  #4.1                  "a" => '10', "b" => '20'
+    NOTICE:  #4.1              <-- end of assignment (elapsed time=0.076 ms)
+    NOTICE:  #4.1                  "res" => '130'
+    NOTICE:  #4.2       7      --> start of RETURN
+    NOTICE:  #4.2                  "res" => '130'
+    NOTICE:  #4.2              <-- end of RETURN (elapsed time=0.054 ms)
+    NOTICE:  #4                <<- end of function fx (elapsed time=0.373 ms)
+    NOTICE:  #2.1            <-- end of PERFORM (elapsed time=0.589 ms)
+    NOTICE:  #2              <<- end of function fx (elapsed time=0.727 ms)
+    NOTICE:  #0.1          <-- end of PERFORM (elapsed time=1.147 ms)
+    NOTICE:  #0            <<- end of block (elapsed time=1.286 ms)
+
+Special feature of tracer is tracing of `ASSERT` statement when `plpgsql_check.trace_assert` is `on`. When
+`plpgsql_check.trace_assert_verbosity` is `DEFAULT`, then all function's or procedure's variables are
+displayed when assert expression is false. When this configuration is `VERBOSE` then all variables
+from all plpgsql frames are displayed. This behaviour is independent on `plpgsql.check_asserts` value.
+It can be used, although the assertions are disabled in plpgsql runtime.
+
+    postgres=# set plpgsql_check.tracer to off;
+    postgres=# set plpgsql_check.trace_assert_verbosity TO verbose;
+
+    postgres=# do $$ begin perform fx(10,null, 'now', e'stěhule'); end; $$;
+    NOTICE:  #4 PLpgSQL assert expression (false) on line 12 of fx(integer) is false
+    NOTICE:   "a" => '10', "res" => null, "b" => '20'
+    NOTICE:  #2 PL/pgSQL function fx(integer,integer,date,text) line 1 at PERFORM
+    NOTICE:   "a" => '10', "b" => null, "c" => '2020-08-05', "d" => 'stěhule'
+    NOTICE:  #0 PL/pgSQL function inline_code_block line 1 at PERFORM
+    ERROR:  assertion failed
+    CONTEXT:  PL/pgSQL function fx(integer) line 12 at ASSERT
+    SQL statement "SELECT fx(a)"
+    PL/pgSQL function fx(integer,integer,date,text) line 1 at PERFORM
+    SQL statement "SELECT fx(10,null, 'now', e'stěhule')"
+    PL/pgSQL function inline_code_block line 1 at PERFORM
+
+    postgres=# set plpgsql.check_asserts to off;
+    SET
+    postgres=# do $$ begin perform fx(10,null, 'now', e'stěhule'); end; $$;
+    NOTICE:  #4 PLpgSQL assert expression (false) on line 12 of fx(integer) is false
+    NOTICE:   "a" => '10', "res" => null, "b" => '20'
+    NOTICE:  #2 PL/pgSQL function fx(integer,integer,date,text) line 1 at PERFORM
+    NOTICE:   "a" => '10', "b" => null, "c" => '2020-08-05', "d" => 'stěhule'
+    NOTICE:  #0 PL/pgSQL function inline_code_block line 1 at PERFORM
+    DO
+
+
+## Attention - SECURITY
+
+Tracer prints content of variables or function arguments. For security definer function, this
+content can hold security sensitive data. This is reason why tracer is disabled by default and should
+be enabled only with super user rights `plpgsql_check.enable_tracer`.
+
+# Pragma
+
+You can configure plpgsql_check behave inside checked function with "pragma" function. This
+is a analogy of PL/SQL or ADA language of PRAGMA feature. PLpgSQL doesn't support PRAGMA, but
+plpgsql_check detects function named `plpgsql_check_pragma` and get options from parameters of
+this function. These plpgsql_check options are valid to end of group of statements.
+
+    CREATE OR REPLACE FUNCTION test()
+    RETURNS void AS $$
+    BEGIN
+      ...
+      -- for following statements disable check
+      PERFORM plpgsql_check_pragma('disable:check');
+      ...
+      -- enable check again
+      PERFORM plpgsql_check_pragma('enable:check');
+      ...
+    END;
+    $$ LANGUAGE plpgsql;
+
+The function `plpgsql_check_pragma` is immutable function that returns one. It is defined
+by `plpgsql_check` extension. You can declare alternative `plpgsql_check_pragma` function
+like:
+
+    CREATE OR REPLACE FUNCTION plpgsql_check_pragma(VARIADIC args[])
+    RETURNS int AS $$
+    SELECT 1
+    $$ LANGUAGE sql IMMUTABLE;
+
+Using pragma function in declaration part of top block sets options on function level too.
+
+    CREATE OR REPLACE FUNCTION test()
+    RETURNS void AS $$
+    DECLARE
+      aux int := plpgsql_check_pragma('disable:extra_warnings');
+      ...
+
+
+## Supported pragmas
+
+* `echo:str` - print string (for testing)
+
+* `status:check`,`status:tracer`, `status:other_warnings`, `status:performance_warnings`, `status:extra_warnings`,`status:security_warnings`
+
+* `enable:check`,`enable:tracer`, `enable:other_warnings`, `enable:performance_warnings`, `enable:extra_warnings`,`enable:security_warnings`
+
+* `disable:check`,`disable:tracer`, `disable:other_warnings`, `disable:performance_warnings`, `disable:extra_warnings`,`disable:security_warnings`
+
+Pragmas `enable:tracer` and `disable:tracer`are active for Postgres 12 and higher
 
 # Compilation
 
@@ -543,19 +750,20 @@ ICU support)
 
 ## Compilation plpgsql_check on OS X
 
-use `-undefined dynamic_lookup` to the last line of the `Makefile ("override CFLAGS += ...")` allowed it to build.
+use `-undefined dynamic_lookup` to the last line of the `Makefile ("override CFLAGS += ...")` allowed it to build
+(It should not be necessary for current code).
 
-## Compilation plpgsql_check on Windows 7
+## Compilation plpgsql_check on Windows
 
 You can check precompiled dll libraries http://okbob.blogspot.cz/2015/02/plpgsqlcheck-is-available-for-microsoft.html
 
 or compile by self:
 
-1. Download and install PostgreSQL 9.3.4 for Win32 from http://www.enterprisedb.com
-2. Download and install Microsoft Visual C++ 2010 Express
+1. Download and install PostgreSQL for Win32 from http://www.enterprisedb.com
+2. Download and install Microsoft Visual C++ Express
 3. Lern tutorial http://blog.2ndquadrant.com/compiling-postgresql-extensions-visual-studio-windows
 4. The plpgsql_check depends on plpgsql and we need to add plpgsql.lib to the library list. Unfortunately PostgreSQL 9.4.3 does not contain this library.
-5. Create a plpgsql.lib from plpgsql.dll as described in http://adrianhenke.wordpress.com/2008/12/05/create-lib-file-from-dll
+5. Create a plpgsql.lib from plpgsql.dll as described in http://adrianhenke.wordpress.com/2008/12/05/create-lib-file-from-dll (this step is not necessary now)
 6. Change `plpgsql_check.c` file, add `PGDLLEXPORT` line before evry extension function, as described in http://blog.2ndquadrant.com/compiling-postgresql-extensions-visual-studio-windows 
    (Skip this step if you have a version with "plpgsql_check_builtins.h" header file).
    <pre>
@@ -586,7 +794,7 @@ or compile by self:
 
 * gcc on Linux (against all supported PostgreSQL)
 * clang 3.4 on Linux (against PostgreSQL 9.5)
-* for success regress tests the PostgreSQL 9.4.5, 9.5 or higher is required
+* for success regress tests the PostgreSQL 9.5 or higher is required
 
 Compilation against PostgreSQL 10 requires libICU!
 

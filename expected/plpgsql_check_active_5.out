@@ -1090,9 +1090,9 @@ select * from plpgsql_check_function('f1(int)');
  warning extra:00000:6:DECLARE:never read variable "_f4"
  warning extra:00000:8:DECLARE:never read variable "_r"
  warning extra:00000:9:DECLARE:never read variable "_tbl"
- warning extra:00000:unused parameter "$1"
- warning extra:00000:unmodified OUT variable "$2"
- warning extra:00000:unmodified OUT variable "$3"
+ warning extra:00000:unused parameter "_input1"
+ warning extra:00000:unmodified OUT variable "_output1"
+ warning extra:00000:unmodified OUT variable "_output2"
 (9 rows)
 
 drop function f1(int);
@@ -1263,9 +1263,9 @@ $$ language plpgsql;
 select * from plpgsql_check_function('f1()', performance_warnings := true);
                                 plpgsql_check_function                                
 --------------------------------------------------------------------------------------
- performance:42804:7:assignment:target type is different type than source type
- Detail: cast "unknown" value to "integer" type
- Hint: Hidden casting can be a performance issue.
+ warning:42804:7:assignment:target type is different type than source type
+ Detail: cast "text" value to "integer" type
+ Hint: The input expression type does not have an assignment cast to the target type.
  Context: at assignment to variable "intval" declared on line 3
  warning:42804:8:assignment:target type is different type than source type
  Detail: cast "text" value to "integer" type
@@ -1275,9 +1275,9 @@ select * from plpgsql_check_function('f1()', performance_warnings := true);
  Detail: cast "date" value to "integer" type
  Hint: There are no possible explicit coercion between those types, possibly bug!
  Context: at assignment to variable "intval" declared on line 3
- performance:42804:12:SQL statement:target type is different type than source type
- Detail: cast "unknown" value to "integer" type
- Hint: Hidden casting can be a performance issue.
+ warning:42804:12:SQL statement:target type is different type than source type
+ Detail: cast "text" value to "integer" type
+ Hint: The input expression type does not have an assignment cast to the target type.
  warning:42804:13:SQL statement:target type is different type than source type
  Detail: cast "text" value to "integer" type
  Hint: The input expression type does not have an assignment cast to the target type.
@@ -1445,10 +1445,11 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fx()', performance_warnings := true);
-                       plpgsql_check_function                        
----------------------------------------------------------------------
+                             plpgsql_check_function                              
+---------------------------------------------------------------------------------
  error:42804:4:RETURN NEXT:wrong record type supplied in RETURN NEXT
-(1 row)
+ Detail: Returned type integer does not match expected type numeric in column 2.
+(2 rows)
 
 create or replace function fx()
 returns setof t2 as $$
@@ -1839,10 +1840,11 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function_tb('fx()', performance_warnings := true);
- functionid | lineno | statement | sqlstate |                     message                     | detail |                                       hint                                        |    level    | position | query | context 
-------------+--------+-----------+----------+-------------------------------------------------+--------+-----------------------------------------------------------------------------------+-------------+----------+-------+---------
- fx         |        |           | 00000    | routine is marked as VOLATILE, should be STABLE |        | When you fix this issue, please, recheck other functions that uses this function. | performance |          |       | 
-(1 row)
+ functionid | lineno |     statement      | sqlstate |                     message                     | detail |                                       hint                                        |    level    | position | query | context 
+------------+--------+--------------------+----------+-------------------------------------------------+--------+-----------------------------------------------------------------------------------+-------------+----------+-------+---------
+ fx         |      6 | FOREACH over array | 00000    | too few attributes for composite variable       |        |                                                                                   | warning     |          |       | 
+ fx         |        |                    | 00000    | routine is marked as VOLATILE, should be STABLE |        | When you fix this issue, please, recheck other functions that uses this function. | performance |          |       | 
+(2 rows)
 
 create or replace function fx()
 returns int as $$
@@ -2049,7 +2051,7 @@ $$ language plpgsql;
 select test_t();
  test_t 
 --------
- ()
+ 
 (1 row)
 
 select * from test_t();
@@ -2079,7 +2081,7 @@ $$ language plpgsql;
 select test_t();
  test_t 
 --------
- ()
+ 
 (1 row)
 
 select * from test_t();
@@ -2112,7 +2114,7 @@ $$ language plpgsql;
 select test_t();
  test_t 
 --------
- ()
+ 
 (1 row)
 
 select * from test_t();
@@ -2141,7 +2143,7 @@ $$ language plpgsql;
 select test_t();
  test_t 
 --------
- ()
+ 
 (1 row)
 
 select * from test_t();
@@ -2172,7 +2174,7 @@ $$ language plpgsql;
 select test_t();
  test_t 
 --------
- ()
+ 
 (1 row)
 
 select * from test_t();
@@ -2301,17 +2303,13 @@ begin
 end;
 $$ language plpgsql;
 select fxx();
-ERROR:  cannot begin/end transactions in PL/pgSQL
-HINT:  Use a BEGIN block with an EXCEPTION clause instead.
-CONTEXT:  PL/pgSQL function fxx() line 3 at SQL statement
+ERROR:  invalid transaction termination
+CONTEXT:  PL/pgSQL function fxx() line 3 at ROLLBACK
 select * from plpgsql_check_function('fxx()');
-                        plpgsql_check_function                         
------------------------------------------------------------------------
- error:0A000:3:SQL statement:cannot begin/end transactions in PL/pgSQL
- Query: rollback
- --     ^
- Hint: Use a BEGIN block with an EXCEPTION clause instead.
-(4 rows)
+                 plpgsql_check_function                 
+--------------------------------------------------------
+ error:2D000:3:ROLLBACK:invalid transaction termination
+(1 row)
 
 drop function fxx();
 create or replace function fxx()
@@ -2347,10 +2345,10 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fxx(int, int)');
-              plpgsql_check_function              
---------------------------------------------------
- warning extra:00000:unused parameter "$2"
- warning extra:00000:unmodified OUT variable "$4"
+             plpgsql_check_function              
+-------------------------------------------------
+ warning extra:00000:unused parameter "b"
+ warning extra:00000:unmodified OUT variable "d"
 (2 rows)
 
 create or replace function fxx(in a int, in b int, out c int, out d int)
@@ -2360,11 +2358,11 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fxx(int, int)');
-              plpgsql_check_function              
---------------------------------------------------
- warning extra:00000:unused parameter "$1"
- warning extra:00000:unused parameter "$2"
- warning extra:00000:unmodified OUT variable "$4"
+             plpgsql_check_function              
+-------------------------------------------------
+ warning extra:00000:unused parameter "a"
+ warning extra:00000:unused parameter "b"
+ warning extra:00000:unmodified OUT variable "d"
 (3 rows)
 
 create type ct as (a int, b int);
@@ -2375,12 +2373,12 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fxx(ct, ct)');
-                         plpgsql_check_function                         
-------------------------------------------------------------------------
- warning extra:00000:unused parameter "$2"
- warning extra:00000:composite OUT variable "$3" is not single argument
- warning extra:00000:composite OUT variable "$4" is not single argument
- warning extra:00000:unmodified OUT variable "$4"
+                        plpgsql_check_function                         
+-----------------------------------------------------------------------
+ warning extra:00000:unused parameter "b"
+ warning extra:00000:composite OUT variable "c" is not single argument
+ warning extra:00000:composite OUT variable "d" is not single argument
+ warning extra:00000:unmodified OUT variable "d"
 (4 rows)
 
 create or replace function fxx(a ct, b ct, OUT c ct, OUT d ct)
@@ -2390,13 +2388,13 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fxx(ct, ct)');
-                         plpgsql_check_function                         
-------------------------------------------------------------------------
- warning extra:00000:unused parameter "$1"
- warning extra:00000:unused parameter "$2"
- warning extra:00000:composite OUT variable "$3" is not single argument
- warning extra:00000:composite OUT variable "$4" is not single argument
- warning extra:00000:unmodified OUT variable "$4"
+                        plpgsql_check_function                         
+-----------------------------------------------------------------------
+ warning extra:00000:unused parameter "a"
+ warning extra:00000:unused parameter "b"
+ warning extra:00000:composite OUT variable "c" is not single argument
+ warning extra:00000:composite OUT variable "d" is not single argument
+ warning extra:00000:unmodified OUT variable "d"
 (5 rows)
 
 create or replace function tx(a int)
@@ -2421,7 +2419,7 @@ select * from plpgsql_check_function('tx(int)');
  warning:00000:2:DECLARE:unused variable "ax"
  warning extra:00000:2:DECLARE:never read variable "a"
  warning extra:00000:4:DECLARE:never read variable "ax"
- warning extra:00000:unused parameter "$1"
+ warning extra:00000:unused parameter "a"
 (8 rows)
 
 create type xt as (a int, b int, c int);
@@ -2434,14 +2432,12 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fx_xt()');
-               plpgsql_check_function               
-----------------------------------------------------
+             plpgsql_check_function              
+-------------------------------------------------
  warning:00000:2:DECLARE:unused variable "l"
  warning:00000:3:DECLARE:unused variable "a"
- warning extra:00000:unmodified OUT variable "xt.a"
- warning extra:00000:unmodified OUT variable "xt.b"
- warning extra:00000:unmodified OUT variable "xt.c"
-(5 rows)
+ warning extra:00000:unmodified OUT variable "x"
+(3 rows)
 
 drop function fx_xt();
 create or replace function fx_xt(out x xt)
@@ -2454,13 +2450,11 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fx_xt()');
-               plpgsql_check_function               
-----------------------------------------------------
+           plpgsql_check_function            
+---------------------------------------------
  warning:00000:2:DECLARE:unused variable "l"
  warning:00000:3:DECLARE:unused variable "a"
- warning extra:00000:unmodified OUT variable "xt.a"
- warning extra:00000:unmodified OUT variable "xt.b"
-(4 rows)
+(2 rows)
 
 drop function fx_xt();
 create or replace function fx_xt(out x xt, out y xt)
@@ -2471,14 +2465,14 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fx_xt()');
-                         plpgsql_check_function                         
-------------------------------------------------------------------------
+                        plpgsql_check_function                         
+-----------------------------------------------------------------------
  warning:00000:2:DECLARE:unused variable "c1"
  warning:00000:2:DECLARE:unused variable "c2"
- warning extra:00000:composite OUT variable "$1" is not single argument
- warning extra:00000:unmodified OUT variable "$1"
- warning extra:00000:composite OUT variable "$2" is not single argument
- warning extra:00000:unmodified OUT variable "$2"
+ warning extra:00000:composite OUT variable "x" is not single argument
+ warning extra:00000:unmodified OUT variable "x"
+ warning extra:00000:composite OUT variable "y" is not single argument
+ warning extra:00000:unmodified OUT variable "y"
 (6 rows)
 
 drop function fx_xt();
@@ -2492,12 +2486,12 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fx_xt()');
-                         plpgsql_check_function                         
-------------------------------------------------------------------------
+                        plpgsql_check_function                         
+-----------------------------------------------------------------------
  warning:00000:2:DECLARE:unused variable "c1"
  warning:00000:2:DECLARE:unused variable "c2"
- warning extra:00000:composite OUT variable "$1" is not single argument
- warning extra:00000:composite OUT variable "$2" is not single argument
+ warning extra:00000:composite OUT variable "x" is not single argument
+ warning extra:00000:composite OUT variable "y" is not single argument
 (4 rows)
 
 drop function fx_xt();
@@ -2508,11 +2502,11 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fx_xt()');
-                         plpgsql_check_function                         
-------------------------------------------------------------------------
- warning extra:00000:composite OUT variable "$1" is not single argument
- warning extra:00000:unmodified OUT variable "$1"
- warning extra:00000:unmodified OUT variable "$2"
+                        plpgsql_check_function                         
+-----------------------------------------------------------------------
+ warning extra:00000:composite OUT variable "x" is not single argument
+ warning extra:00000:unmodified OUT variable "x"
+ warning extra:00000:unmodified OUT variable "z"
 (3 rows)
 
 drop function fx_xt();
@@ -2905,12 +2899,9 @@ alter table testtable drop column b;
 -- there is not possibility to enforce recompilation
 -- before checking. 
 select * from plpgsql_check_function('test()');
-                        plpgsql_check_function                         
------------------------------------------------------------------------
- warning:00000:4:SQL statement:too few attributes for target variables
- Detail: There are more target variables than output columns in query.
- Hint: Check target variables in SELECT INTO statement.
-(3 rows)
+ plpgsql_check_function 
+------------------------
+(0 rows)
 
 drop function test();
 -- issue #32
@@ -3504,7 +3495,7 @@ $$ language plpgsql;
 select * from plpgsql_check_function('f1()');
               plpgsql_check_function              
 --------------------------------------------------
- warning extra:00000:unmodified OUT variable "$1"
+ warning extra:00000:unmodified OUT variable "cr"
 (1 row)
 
 create or replace function f1(out cr refcursor)
@@ -3634,9 +3625,8 @@ select * from plpgsql_check_function('fx()');
                 plpgsql_check_function                
 ------------------------------------------------------
  error:42703:5:RAISE:record "var" has no field "hint"
- Query: SELECT var.hint
- --            ^
-(3 rows)
+ Context: SQL statement "SELECT var.hint"
+(2 rows)
 
 drop function fx();
 create or replace function foo_format(a text, b text)
@@ -3923,7 +3913,8 @@ $$ language plpgsql;
 select * from dyn_sql_4();
 ERROR:  structure of query does not match function result type
 DETAIL:  Number of returned columns (3) does not match expected column count (2).
-CONTEXT:  PL/pgSQL function dyn_sql_4() line 3 at RETURN QUERY
+CONTEXT:  SQL statement "select 10, 20, 30"
+PL/pgSQL function dyn_sql_4() line 3 at RETURN QUERY
 -- should be error
 select * from plpgsql_check_function('dyn_sql_4()');
                               plpgsql_check_function                               
@@ -7258,7 +7249,7 @@ select stmtid, exec_stmts, stmtname from plpgsql_profiler_function_statements_tb
 select plpgsql_coverage_statements('covtest');
  plpgsql_coverage_statements 
 -----------------------------
-           0.833333333333333
+          0.8333333333333334
 (1 row)
 
 select plpgsql_coverage_branches('covtest');
@@ -7345,7 +7336,7 @@ $$ language plpgsql;
 create trigger tracer_tab_trg before insert on tracer_tab for each row execute procedure tracer_tab_trg_fx();
 select fxo(10,20,'20200815', 3.14);
 NOTICE:  #0   ->> start of function fxo(integer,integer,date,numeric) (oid=0)
-NOTICE:  #0       "$1" => '10', "$2" => '20', "$3" => '08-15-2020', "$4" => '3.14'
+NOTICE:  #0       "a" => '10', "b" => '20', "c" => '08-15-2020', "d" => '3.14'
 NOTICE:  #2     ->> start of function tracer_tab_trg_fx() (oid=0)
 NOTICE:  #2          call by fxo(integer,integer,date,numeric) line 3 at SQL statement
 NOTICE:  #2         triggered by before row insert trigger
@@ -7359,7 +7350,7 @@ NOTICE:  #0   <<- end of function fxo (elapsed time=0.010 ms)
 
 select fxo(11,21,'20200816', 6.28);
 NOTICE:  #0   ->> start of function fxo(integer,integer,date,numeric) (oid=0)
-NOTICE:  #0       "$1" => '11', "$2" => '21', "$3" => '08-16-2020', "$4" => '6.28'
+NOTICE:  #0       "a" => '11', "b" => '21', "c" => '08-16-2020', "d" => '6.28'
 NOTICE:  #2     ->> start of function tracer_tab_trg_fx() (oid=0)
 NOTICE:  #2          call by fxo(integer,integer,date,numeric) line 3 at SQL statement
 NOTICE:  #2         triggered by before row insert trigger

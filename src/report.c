@@ -4,7 +4,7 @@
  *
  *			  last stage checks
  *
- * by Pavel Stehule 2013-2018
+ * by Pavel Stehule 2013-2020
  *
  *-------------------------------------------------------------------------
  */
@@ -12,9 +12,10 @@
 #include "plpgsql_check.h"
 
 #include "catalog/pg_proc.h"
+#include "catalog/pg_type.h"
 
-static bool datum_is_explicit(PLpgSQL_checkstate *cstate, int dno);
 static bool datum_is_used(PLpgSQL_checkstate *cstate, int dno, bool write);
+static bool datum_is_explicit(PLpgSQL_checkstate *cstate, int dno);
 
 /*
  * Returns true, when variable is internal (automatic)
@@ -35,8 +36,11 @@ is_internal(char *refname, int lineno)
 }
 
 bool
-is_internal_variable(PLpgSQL_variable *var)
+is_internal_variable(PLpgSQL_checkstate *cstate, PLpgSQL_variable *var)
 {
+	if (bms_is_member(var->dno, cstate->auto_variables))
+		return true;
+
 	return is_internal(var->refname, var->lineno);
 }
 
@@ -86,10 +90,13 @@ plpgsql_check_datum_get_refname(PLpgSQL_datum *d)
  * Returns true if dno is explicitly declared. It should not be used
  * for arguments.
  */
-static bool
+bool
 datum_is_explicit(PLpgSQL_checkstate *cstate, int dno)
 {
 	PLpgSQL_execstate *estate = cstate->estate;
+
+	if (bms_is_member(dno, cstate->auto_variables))
+		return false;
 
 	switch (estate->datums[dno]->dtype)
 	{
@@ -229,7 +236,6 @@ plpgsql_check_report_unused_variables(PLpgSQL_checkstate *cstate)
 		PLpgSQL_function *func = estate->func;
 
 		/* check never read variables */
-
 		for (i = 0; i < estate->ndatums; i++)
 		{
 			if (datum_is_explicit(cstate, i)
@@ -320,7 +326,7 @@ plpgsql_check_report_unused_variables(PLpgSQL_checkstate *cstate)
 			int		varno = func->out_param_varno;
 			PLpgSQL_variable *var = (PLpgSQL_variable *) estate->datums[varno];
 
-			if (var->dtype == PLPGSQL_DTYPE_ROW && is_internal_variable(var))
+			if (var->dtype == PLPGSQL_DTYPE_ROW && is_internal_variable(cstate, var))
 			{
 				/* this function has more OUT parameters */
 				PLpgSQL_row *row = (PLpgSQL_row*) var;
@@ -352,12 +358,18 @@ plpgsql_check_report_unused_variables(PLpgSQL_checkstate *cstate)
 
 					if (!datum_is_used(cstate, varno2, true))
 					{
+						const char *fmt = cstate->found_return_dyn_query ?
+								  MAYBE_UNMODIFIED_VARIABLE_TEXT : UNMODIFIED_VARIABLE_TEXT;
+
+						const char *detail = cstate->found_return_dyn_query ?
+								  "cannot to determine result of dynamic SQL" : NULL;
+
 						initStringInfo(&message);
-						appendStringInfo(&message, UNMODIFIED_VARIABLE_TEXT, var->refname);
+						appendStringInfo(&message, fmt, var->refname);
 						plpgsql_check_put_error(cstate,
 								  0, 0,
 								  message.data,
-								  NULL,
+								  detail,
 								  NULL,
 								  PLPGSQL_CHECK_WARNING_EXTRA,
 								  0, NULL, NULL);
@@ -374,13 +386,19 @@ plpgsql_check_report_unused_variables(PLpgSQL_checkstate *cstate)
 					PLpgSQL_variable *var = (PLpgSQL_variable *) estate->datums[varno];
 					StringInfoData message;
 
+					const char *fmt = cstate->found_return_dyn_query ?
+							  MAYBE_UNMODIFIED_VARIABLE_TEXT : UNMODIFIED_VARIABLE_TEXT;
+
+					const char *detail = cstate->found_return_dyn_query ?
+							  "cannot to determine result of dynamic SQL" : NULL;
+
 					initStringInfo(&message);
 
-					appendStringInfo(&message, UNMODIFIED_VARIABLE_TEXT, var->refname);
+					appendStringInfo(&message, fmt, var->refname);
 					plpgsql_check_put_error(cstate,
 							  0, 0,
 							  message.data,
-							  NULL,
+							  detail,
 							  NULL,
 							  PLPGSQL_CHECK_WARNING_EXTRA,
 							  0, NULL, NULL);
@@ -402,9 +420,9 @@ plpgsql_check_report_too_high_volatility(PLpgSQL_checkstate *cstate)
 {
 	if (cstate->cinfo->performance_warnings && !cstate->skip_volatility_check)
 	{
-		char	   *current;
-		char	   *should_be;
-		bool 		raise_warning;
+		char	   *current = NULL;
+		char	   *should_be = NULL;
+		bool 		raise_warning = false;
 
 		if (cstate->volatility == PROVOLATILE_IMMUTABLE &&
 				(cstate->decl_volatility == PROVOLATILE_VOLATILE ||
@@ -418,12 +436,13 @@ plpgsql_check_report_too_high_volatility(PLpgSQL_checkstate *cstate)
 		else if (cstate->volatility == PROVOLATILE_STABLE &&
 				(cstate->decl_volatility == PROVOLATILE_VOLATILE))
 		{
-			should_be = "STABLE";
-			current = "VOLATILE";
-			raise_warning = true;
+			if (cstate->cinfo->rettype != VOIDOID)
+			{
+				should_be = "STABLE";
+				current = "VOLATILE";
+				raise_warning = true;
+			}
 		}
-		else
-			raise_warning = false;
 
 		if (raise_warning)
 		{

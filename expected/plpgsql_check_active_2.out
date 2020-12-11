@@ -6,7 +6,6 @@ create extension if not exists plpgsql_check;
 --should fail - is not plpgsql
 select * from plpgsql_check_function_tb('session_user()');
 ERROR:  "session_user"() is not a plpgsql function
-CONTEXT:  PL/pgSQL function plpgsql_check_function_tb(text,regclass,boolean,boolean,boolean,boolean,boolean,name,name) line 3 at RETURN QUERY
 create table t1(a int, b int);
 create table pa (id int, pa_id character varying(32), status character varying(60));
 create table  ml(ml_id character varying(32), status_from character varying(60), pa_id character varying(32), xyz int);
@@ -172,6 +171,55 @@ select lineno, stmt_lineno, exec_stmts, source from plpgsql_profiler_function_tb
       7 |             |            |   end if;
       8 |             |            | end;
 (8 rows)
+
+drop function f1();
+-- test queryid retrieval
+create function f1()
+returns void as $$
+declare
+  t1 text = 't1';
+begin
+  insert into t1 values(10,20);
+  EXECUTE 'update ' ||  't1' || ' set a = 10';
+  EXECUTE 'delete from ' || t1;
+end;
+$$ language plpgsql;
+select plpgsql_profiler_reset_all();
+ plpgsql_profiler_reset_all 
+----------------------------
+ 
+(1 row)
+
+select plpgsql_profiler_install_fake_queryid_hook();
+ plpgsql_profiler_install_fake_queryid_hook 
+--------------------------------------------
+ 
+(1 row)
+
+select f1();
+ f1 
+----
+ 
+(1 row)
+
+select queryids, lineno, stmt_lineno, exec_stmts, source from plpgsql_profiler_function_tb('f1()');
+ queryids | lineno | stmt_lineno | exec_stmts |                     source                     
+----------+--------+-------------+------------+------------------------------------------------
+          |      1 |             |            | 
+          |      2 |             |            | declare
+          |      3 |             |            |   t1 text = 't1';
+          |      4 |           4 |          1 | begin
+ {3}      |      5 |           5 |          1 |   insert into t1 values(10,20);
+ {2}      |      6 |           6 |          1 |   EXECUTE 'update ' ||  't1' || ' set a = 10';
+ {4}      |      7 |           7 |          1 |   EXECUTE 'delete from ' || t1;
+          |      8 |             |            | end;
+(8 rows)
+
+select plpgsql_profiler_remove_fake_queryid_hook();
+ plpgsql_profiler_remove_fake_queryid_hook 
+-------------------------------------------
+ 
+(1 row)
 
 drop function f1();
 set plpgsql_check.profiler to off;
@@ -1042,9 +1090,9 @@ select * from plpgsql_check_function('f1(int)');
  warning extra:00000:6:DECLARE:never read variable "_f4"
  warning extra:00000:8:DECLARE:never read variable "_r"
  warning extra:00000:9:DECLARE:never read variable "_tbl"
- warning extra:00000:unused parameter "$1"
- warning extra:00000:unmodified OUT variable "$2"
- warning extra:00000:unmodified OUT variable "$3"
+ warning extra:00000:unused parameter "_input1"
+ warning extra:00000:unmodified OUT variable "_output1"
+ warning extra:00000:unmodified OUT variable "_output2"
 (9 rows)
 
 drop function f1(int);
@@ -1213,11 +1261,11 @@ begin
 end
 $$ language plpgsql;
 select * from plpgsql_check_function('f1()', performance_warnings := true);
-                                 plpgsql_check_function                                  
------------------------------------------------------------------------------------------
- performance:42804:7:assignment:target type is different type than source type
- Detail: cast "unknown" value to "integer" type
- Hint: Hidden casting can be a performance issue.
+                                plpgsql_check_function                                
+--------------------------------------------------------------------------------------
+ warning:42804:7:assignment:target type is different type than source type
+ Detail: cast "text" value to "integer" type
+ Hint: The input expression type does not have an assignment cast to the target type.
  Context: at assignment to variable "intval" declared on line 3
  warning:42804:8:assignment:target type is different type than source type
  Detail: cast "text" value to "integer" type
@@ -1227,16 +1275,14 @@ select * from plpgsql_check_function('f1()', performance_warnings := true);
  Detail: cast "date" value to "integer" type
  Hint: There are no possible explicit coercion between those types, possibly bug!
  Context: at assignment to variable "intval" declared on line 3
- performance:42804:12:SQL statement:target type is different type than source type
- Detail: cast "unknown" value to "integer" type
- Hint: Hidden casting can be a performance issue.
+ warning:42804:12:SQL statement:target type is different type than source type
+ Detail: cast "text" value to "integer" type
+ Hint: The input expression type does not have an assignment cast to the target type.
  warning:42804:13:SQL statement:target type is different type than source type
  Detail: cast "text" value to "integer" type
  Hint: The input expression type does not have an assignment cast to the target type.
  warning extra:00000:3:DECLARE:never read variable "intval"
- performance:00000:routine is marked as VOLATILE, should be STABLE
- Hint: When you fix this issue, please, recheck other functions that uses this function.
-(21 rows)
+(19 rows)
 
 drop function f1();
 create or replace function f1()
@@ -1399,10 +1445,11 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fx()', performance_warnings := true);
-                       plpgsql_check_function                        
----------------------------------------------------------------------
+                             plpgsql_check_function                              
+---------------------------------------------------------------------------------
  error:42804:4:RETURN NEXT:wrong record type supplied in RETURN NEXT
-(1 row)
+ Detail: Returned type integer does not match expected type numeric in column 2.
+(2 rows)
 
 create or replace function fx()
 returns setof t2 as $$
@@ -1793,10 +1840,11 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function_tb('fx()', performance_warnings := true);
- functionid | lineno | statement | sqlstate |                     message                     | detail |                                       hint                                        |    level    | position | query | context 
-------------+--------+-----------+----------+-------------------------------------------------+--------+-----------------------------------------------------------------------------------+-------------+----------+-------+---------
- fx         |        |           | 00000    | routine is marked as VOLATILE, should be STABLE |        | When you fix this issue, please, recheck other functions that uses this function. | performance |          |       | 
-(1 row)
+ functionid | lineno |     statement      | sqlstate |                     message                     | detail |                                       hint                                        |    level    | position | query | context 
+------------+--------+--------------------+----------+-------------------------------------------------+--------+-----------------------------------------------------------------------------------+-------------+----------+-------+---------
+ fx         |      6 | FOREACH over array | 00000    | too few attributes for composite variable       |        |                                                                                   | warning     |          |       | 
+ fx         |        |                    | 00000    | routine is marked as VOLATILE, should be STABLE |        | When you fix this issue, please, recheck other functions that uses this function. | performance |          |       | 
+(2 rows)
 
 create or replace function fx()
 returns int as $$
@@ -1878,12 +1926,11 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function_tb('fx()', performance_warnings := true, fatal_errors := false);
- functionid | lineno | statement | sqlstate |                     message                     | detail |                                       hint                                        |     level     | position | query | context 
-------------+--------+-----------+----------+-------------------------------------------------+--------+-----------------------------------------------------------------------------------+---------------+----------+-------+---------
- fx         |      2 | DECLARE   | 00000    | unused variable "old"                           |        |                                                                                   | warning       |          |       | 
- fx         |      2 | DECLARE   | 00000    | never read variable "new"                       |        |                                                                                   | warning extra |          |       | 
- fx         |        |           | 00000    | routine is marked as VOLATILE, should be STABLE |        | When you fix this issue, please, recheck other functions that uses this function. | performance   |          |       | 
-(3 rows)
+ functionid | lineno | statement | sqlstate |          message          | detail | hint |     level     | position | query | context 
+------------+--------+-----------+----------+---------------------------+--------+------+---------------+----------+-------+---------
+ fx         |      2 | DECLARE   | 00000    | unused variable "old"     |        |      | warning       |          |       | 
+ fx         |      2 | DECLARE   | 00000    | never read variable "new" |        |      | warning extra |          |       | 
+(2 rows)
 
 drop function fx();
 create or replace function fx()
@@ -2004,7 +2051,7 @@ $$ language plpgsql;
 select test_t();
  test_t 
 --------
- ()
+ 
 (1 row)
 
 select * from test_t();
@@ -2034,7 +2081,7 @@ $$ language plpgsql;
 select test_t();
  test_t 
 --------
- ()
+ 
 (1 row)
 
 select * from test_t();
@@ -2044,15 +2091,13 @@ select * from test_t();
 (1 row)
 
 select * from plpgsql_check_function('fx()', performance_warnings := true, fatal_errors := false);
-                                 plpgsql_check_function                                  
------------------------------------------------------------------------------------------
+                          plpgsql_check_function                          
+--------------------------------------------------------------------------
  performance:42804:7:FETCH:target type is different type than source type
  Detail: cast "integer" value to "character varying" type
  Hint: Hidden casting can be a performance issue.
  warning extra:00000:4:DECLARE:never read variable "x"
- performance:00000:routine is marked as VOLATILE, should be STABLE
- Hint: When you fix this issue, please, recheck other functions that uses this function.
-(6 rows)
+(4 rows)
 
 drop function fx();
 create or replace function fx()
@@ -2069,7 +2114,7 @@ $$ language plpgsql;
 select test_t();
  test_t 
 --------
- ()
+ 
 (1 row)
 
 select * from test_t();
@@ -2079,12 +2124,10 @@ select * from test_t();
 (1 row)
 
 select * from plpgsql_check_function('fx()', performance_warnings := true, fatal_errors := false);
-                                 plpgsql_check_function                                  
------------------------------------------------------------------------------------------
+                plpgsql_check_function                 
+-------------------------------------------------------
  warning extra:00000:4:DECLARE:never read variable "x"
- performance:00000:routine is marked as VOLATILE, should be STABLE
- Hint: When you fix this issue, please, recheck other functions that uses this function.
-(3 rows)
+(1 row)
 
 drop function fx();
 create or replace function fx()
@@ -2100,7 +2143,7 @@ $$ language plpgsql;
 select test_t();
  test_t 
 --------
- ()
+ 
 (1 row)
 
 select * from test_t();
@@ -2110,14 +2153,12 @@ select * from test_t();
 (1 row)
 
 select * from plpgsql_check_function('fx()', performance_warnings := true, fatal_errors := false);
-                                 plpgsql_check_function                                  
------------------------------------------------------------------------------------------
+                plpgsql_check_function                 
+-------------------------------------------------------
  error:42703:6:RAISE:record "r" has no field "a"
  Context: SQL statement "SELECT r.a"
  warning extra:00000:5:DECLARE:never read variable "r"
- performance:00000:routine is marked as VOLATILE, should be STABLE
- Hint: When you fix this issue, please, recheck other functions that uses this function.
-(5 rows)
+(3 rows)
 
 drop function fx();
 create or replace function fx()
@@ -2133,7 +2174,7 @@ $$ language plpgsql;
 select test_t();
  test_t 
 --------
- ()
+ 
 (1 row)
 
 select * from test_t();
@@ -2143,11 +2184,9 @@ select * from test_t();
 (1 row)
 
 select * from plpgsql_check_function('fx()', performance_warnings := true, fatal_errors := false);
-                                 plpgsql_check_function                                  
------------------------------------------------------------------------------------------
- performance:00000:routine is marked as VOLATILE, should be STABLE
- Hint: When you fix this issue, please, recheck other functions that uses this function.
-(2 rows)
+ plpgsql_check_function 
+------------------------
+(0 rows)
 
 drop function fx();
 create table foo(a int, b int);
@@ -2167,8 +2206,8 @@ select fx();
 (1 row)
 
 select * from plpgsql_check_function('fx()', performance_warnings := true, fatal_errors := false);
-                                 plpgsql_check_function                                  
------------------------------------------------------------------------------------------
+                         plpgsql_check_function                         
+------------------------------------------------------------------------
  warning:00000:4:SQL statement:too many attributes for target variables
  Detail: There are less target variables than output columns in query.
  Hint: Check target variables in SELECT INTO statement
@@ -2180,9 +2219,7 @@ select * from plpgsql_check_function('fx()', performance_warnings := true, fatal
  Hint: Check target variables in SELECT INTO statement.
  warning extra:00000:2:DECLARE:never read variable "f1"
  warning extra:00000:2:DECLARE:never read variable "f2"
- performance:00000:routine is marked as VOLATILE, should be STABLE
- Hint: When you fix this issue, please, recheck other functions that uses this function.
-(13 rows)
+(11 rows)
 
 drop function fx();
 drop table foo;
@@ -2198,15 +2235,13 @@ select fx();
 ERROR:  invalid input syntax for type date: "1"
 CONTEXT:  PL/pgSQL function fx() line 4 at assignment
 select * from plpgsql_check_function('fx()', performance_warnings := true, fatal_errors := false);
-                                 plpgsql_check_function                                  
------------------------------------------------------------------------------------------
+                              plpgsql_check_function                              
+----------------------------------------------------------------------------------
  warning:42804:4:assignment:target type is different type than source type
  Detail: cast "integer" value to "date" type
  Hint: There are no possible explicit coercion between those types, possibly bug!
  Context: at assignment to variable "d" declared on line 2
- performance:00000:routine is marked as VOLATILE, should be STABLE
- Hint: When you fix this issue, please, recheck other functions that uses this function.
-(6 rows)
+(4 rows)
 
 drop function fx();
 create table tab_1(i int);
@@ -2268,17 +2303,13 @@ begin
 end;
 $$ language plpgsql;
 select fxx();
-ERROR:  cannot begin/end transactions in PL/pgSQL
-HINT:  Use a BEGIN block with an EXCEPTION clause instead.
-CONTEXT:  PL/pgSQL function fxx() line 3 at SQL statement
+ERROR:  invalid transaction termination
+CONTEXT:  PL/pgSQL function fxx() line 3 at ROLLBACK
 select * from plpgsql_check_function('fxx()');
-                        plpgsql_check_function                         
------------------------------------------------------------------------
- error:0A000:3:SQL statement:cannot begin/end transactions in PL/pgSQL
- Query: rollback
- --     ^
- Hint: Use a BEGIN block with an EXCEPTION clause instead.
-(4 rows)
+                 plpgsql_check_function                 
+--------------------------------------------------------
+ error:2D000:3:ROLLBACK:invalid transaction termination
+(1 row)
 
 drop function fxx();
 create or replace function fxx()
@@ -2314,10 +2345,10 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fxx(int, int)');
-              plpgsql_check_function              
---------------------------------------------------
- warning extra:00000:unused parameter "$2"
- warning extra:00000:unmodified OUT variable "$4"
+             plpgsql_check_function              
+-------------------------------------------------
+ warning extra:00000:unused parameter "b"
+ warning extra:00000:unmodified OUT variable "d"
 (2 rows)
 
 create or replace function fxx(in a int, in b int, out c int, out d int)
@@ -2327,11 +2358,11 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fxx(int, int)');
-              plpgsql_check_function              
---------------------------------------------------
- warning extra:00000:unused parameter "$1"
- warning extra:00000:unused parameter "$2"
- warning extra:00000:unmodified OUT variable "$4"
+             plpgsql_check_function              
+-------------------------------------------------
+ warning extra:00000:unused parameter "a"
+ warning extra:00000:unused parameter "b"
+ warning extra:00000:unmodified OUT variable "d"
 (3 rows)
 
 create type ct as (a int, b int);
@@ -2342,12 +2373,12 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fxx(ct, ct)');
-                         plpgsql_check_function                         
-------------------------------------------------------------------------
- warning extra:00000:unused parameter "$2"
- warning extra:00000:composite OUT variable "$3" is not single argument
- warning extra:00000:composite OUT variable "$4" is not single argument
- warning extra:00000:unmodified OUT variable "$4"
+                        plpgsql_check_function                         
+-----------------------------------------------------------------------
+ warning extra:00000:unused parameter "b"
+ warning extra:00000:composite OUT variable "c" is not single argument
+ warning extra:00000:composite OUT variable "d" is not single argument
+ warning extra:00000:unmodified OUT variable "d"
 (4 rows)
 
 create or replace function fxx(a ct, b ct, OUT c ct, OUT d ct)
@@ -2357,13 +2388,13 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fxx(ct, ct)');
-                         plpgsql_check_function                         
-------------------------------------------------------------------------
- warning extra:00000:unused parameter "$1"
- warning extra:00000:unused parameter "$2"
- warning extra:00000:composite OUT variable "$3" is not single argument
- warning extra:00000:composite OUT variable "$4" is not single argument
- warning extra:00000:unmodified OUT variable "$4"
+                        plpgsql_check_function                         
+-----------------------------------------------------------------------
+ warning extra:00000:unused parameter "a"
+ warning extra:00000:unused parameter "b"
+ warning extra:00000:composite OUT variable "c" is not single argument
+ warning extra:00000:composite OUT variable "d" is not single argument
+ warning extra:00000:unmodified OUT variable "d"
 (5 rows)
 
 create or replace function tx(a int)
@@ -2388,7 +2419,7 @@ select * from plpgsql_check_function('tx(int)');
  warning:00000:2:DECLARE:unused variable "ax"
  warning extra:00000:2:DECLARE:never read variable "a"
  warning extra:00000:4:DECLARE:never read variable "ax"
- warning extra:00000:unused parameter "$1"
+ warning extra:00000:unused parameter "a"
 (8 rows)
 
 create type xt as (a int, b int, c int);
@@ -2401,14 +2432,12 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fx_xt()');
-               plpgsql_check_function               
-----------------------------------------------------
+             plpgsql_check_function              
+-------------------------------------------------
  warning:00000:2:DECLARE:unused variable "l"
  warning:00000:3:DECLARE:unused variable "a"
- warning extra:00000:unmodified OUT variable "xt.a"
- warning extra:00000:unmodified OUT variable "xt.b"
- warning extra:00000:unmodified OUT variable "xt.c"
-(5 rows)
+ warning extra:00000:unmodified OUT variable "x"
+(3 rows)
 
 drop function fx_xt();
 create or replace function fx_xt(out x xt)
@@ -2421,13 +2450,11 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fx_xt()');
-               plpgsql_check_function               
-----------------------------------------------------
+           plpgsql_check_function            
+---------------------------------------------
  warning:00000:2:DECLARE:unused variable "l"
  warning:00000:3:DECLARE:unused variable "a"
- warning extra:00000:unmodified OUT variable "xt.a"
- warning extra:00000:unmodified OUT variable "xt.b"
-(4 rows)
+(2 rows)
 
 drop function fx_xt();
 create or replace function fx_xt(out x xt, out y xt)
@@ -2438,14 +2465,14 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fx_xt()');
-                         plpgsql_check_function                         
-------------------------------------------------------------------------
+                        plpgsql_check_function                         
+-----------------------------------------------------------------------
  warning:00000:2:DECLARE:unused variable "c1"
  warning:00000:2:DECLARE:unused variable "c2"
- warning extra:00000:composite OUT variable "$1" is not single argument
- warning extra:00000:unmodified OUT variable "$1"
- warning extra:00000:composite OUT variable "$2" is not single argument
- warning extra:00000:unmodified OUT variable "$2"
+ warning extra:00000:composite OUT variable "x" is not single argument
+ warning extra:00000:unmodified OUT variable "x"
+ warning extra:00000:composite OUT variable "y" is not single argument
+ warning extra:00000:unmodified OUT variable "y"
 (6 rows)
 
 drop function fx_xt();
@@ -2459,12 +2486,12 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fx_xt()');
-                         plpgsql_check_function                         
-------------------------------------------------------------------------
+                        plpgsql_check_function                         
+-----------------------------------------------------------------------
  warning:00000:2:DECLARE:unused variable "c1"
  warning:00000:2:DECLARE:unused variable "c2"
- warning extra:00000:composite OUT variable "$1" is not single argument
- warning extra:00000:composite OUT variable "$2" is not single argument
+ warning extra:00000:composite OUT variable "x" is not single argument
+ warning extra:00000:composite OUT variable "y" is not single argument
 (4 rows)
 
 drop function fx_xt();
@@ -2475,11 +2502,11 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fx_xt()');
-                         plpgsql_check_function                         
-------------------------------------------------------------------------
- warning extra:00000:composite OUT variable "$1" is not single argument
- warning extra:00000:unmodified OUT variable "$1"
- warning extra:00000:unmodified OUT variable "$2"
+                        plpgsql_check_function                         
+-----------------------------------------------------------------------
+ warning extra:00000:composite OUT variable "x" is not single argument
+ warning extra:00000:unmodified OUT variable "x"
+ warning extra:00000:unmodified OUT variable "z"
 (3 rows)
 
 drop function fx_xt();
@@ -2872,12 +2899,9 @@ alter table testtable drop column b;
 -- there is not possibility to enforce recompilation
 -- before checking. 
 select * from plpgsql_check_function('test()');
-                        plpgsql_check_function                         
------------------------------------------------------------------------
- warning:00000:4:SQL statement:too few attributes for target variables
- Detail: There are more target variables than output columns in query.
- Hint: Check target variables in SELECT INTO statement.
-(3 rows)
+ plpgsql_check_function 
+------------------------
+(0 rows)
 
 drop function test();
 -- issue #32
@@ -2922,9 +2946,7 @@ select * from plpgsql_check_function('test()', performance_warnings := true);
  Detail: An index of some attribute cannot be used, when variable, used in predicate, has not right type like a attribute
  Hint: Check a variable type - int versus numeric
  warning extra:00000:3:DECLARE:never read variable "r"
- performance:00000:routine is marked as VOLATILE, should be STABLE
- Hint: When you fix this issue, please, recheck other functions that uses this function.
-(18 rows)
+(16 rows)
 
 create or replace function test()
 returns void as $$
@@ -2942,12 +2964,10 @@ end;
 $$ language plpgsql;
 -- there are not any performance issue now
 select * from plpgsql_check_function('test()', performance_warnings := true);
-                                 plpgsql_check_function                                  
------------------------------------------------------------------------------------------
+                plpgsql_check_function                 
+-------------------------------------------------------
  warning extra:00000:3:DECLARE:never read variable "r"
- performance:00000:routine is marked as VOLATILE, should be STABLE
- Hint: When you fix this issue, please, recheck other functions that uses this function.
-(3 rows)
+(1 row)
 
 -- nextval, currval and setval test
 create table test_table();
@@ -3039,23 +3059,17 @@ begin
 end;
 $$ language plpgsql;
 select f1();
- f1 
-----
- 
-(1 row)
-
+ERROR:  too many parameters specified for RAISE
+CONTEXT:  compilation of PL/pgSQL function "f1" near line 4
 select * from plpgsql_check_function_tb('f1()');
- functionid | lineno | statement | sqlstate |                 message                 | detail | hint | level | position | query | context 
-------------+--------+-----------+----------+-----------------------------------------+--------+------+-------+----------+-------+---------
- f1         |      4 | RAISE     | 42601    | too many parameters specified for RAISE |        |      | error |          |       | 
+ functionid | lineno | statement | sqlstate |                 message                 | detail | hint | level | position | query |                      context                      
+------------+--------+-----------+----------+-----------------------------------------+--------+------+-------+----------+-------+---------------------------------------------------
+ f1         |        |           | 42601    | too many parameters specified for RAISE |        |      | error |          |       | compilation of PL/pgSQL function "f1" near line 4
 (1 row)
 
 select f1();
- f1 
-----
- 
-(1 row)
-
+ERROR:  too many parameters specified for RAISE
+CONTEXT:  compilation of PL/pgSQL function "f1" near line 4
 drop function f1();
 create or replace function f1()
 returns void as $$
@@ -3066,23 +3080,17 @@ begin
 end;
 $$ language plpgsql;
 select f1();
- f1 
-----
- 
-(1 row)
-
+ERROR:  too few parameters specified for RAISE
+CONTEXT:  compilation of PL/pgSQL function "f1" near line 4
 select * from plpgsql_check_function_tb('f1()');
- functionid | lineno | statement | sqlstate |                message                 | detail | hint | level | position | query | context 
-------------+--------+-----------+----------+----------------------------------------+--------+------+-------+----------+-------+---------
- f1         |      4 | RAISE     | 42601    | too few parameters specified for RAISE |        |      | error |          |       | 
+ functionid | lineno | statement | sqlstate |                message                 | detail | hint | level | position | query |                      context                      
+------------+--------+-----------+----------+----------------------------------------+--------+------+-------+----------+-------+---------------------------------------------------
+ f1         |        |           | 42601    | too few parameters specified for RAISE |        |      | error |          |       | compilation of PL/pgSQL function "f1" near line 4
 (1 row)
 
 select f1();
- f1 
-----
- 
-(1 row)
-
+ERROR:  too few parameters specified for RAISE
+CONTEXT:  compilation of PL/pgSQL function "f1" near line 4
 drop function f1();
 create or replace function ml_trg()
 returns trigger as $$
@@ -3116,10 +3124,8 @@ $$ language plpgsql;
 select * from plpgsql_check_function('ml_trg()', 'ml', performance_warnings := true);
                           plpgsql_check_function                          
 --------------------------------------------------------------------------
- performance:42804:9:SQL statement:target type has type modificator
- Hint: Usage of type modificator enforces slower IO casting.
  error:42703:13:SQL statement:record "new" has no field "status_from_xxx"
-(3 rows)
+(1 row)
 
 create or replace function fx2()
 returns void as $$
@@ -3130,14 +3136,10 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fx2()', performance_warnings := true);
-                                 plpgsql_check_function                                  
------------------------------------------------------------------------------------------
- performance:42804:5:SQL statement:target type has type modificator
- Hint: Usage of type modificator enforces slower IO casting.
+                 plpgsql_check_function                  
+---------------------------------------------------------
  warning extra:00000:2:DECLARE:never read variable "_pa"
- performance:00000:routine is marked as VOLATILE, should be STABLE
- Hint: When you fix this issue, please, recheck other functions that uses this function.
-(5 rows)
+(1 row)
 
 drop function fx2();
 create or replace function fx2()
@@ -3149,15 +3151,10 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('fx2()', performance_warnings := true);
-                                 plpgsql_check_function                                  
------------------------------------------------------------------------------------------
- performance:42804:5:assignment:target type has type modificator
- Hint: Usage of type modificator enforces slower IO casting.
- Context: at assignment to variable "pa.pa_id" declared on line 0
+                 plpgsql_check_function                  
+---------------------------------------------------------
  warning extra:00000:2:DECLARE:never read variable "_pa"
- performance:00000:routine is marked as VOLATILE, should be STABLE
- Hint: When you fix this issue, please, recheck other functions that uses this function.
-(6 rows)
+(1 row)
 
 drop function fx2();
 create or replace function test_lab()
@@ -3179,15 +3176,51 @@ begin
 end;
 $$ language plpgsql;
 select test_lab();
-NOTICE:  1 8
-NOTICE:  1 9
-ERROR:  CONTINUE cannot be used outside a loop
-CONTEXT:  PL/pgSQL function test_lab()
+ERROR:  block label "sub" cannot be used in CONTINUE
+LINE 10:                 continue sub;
+                                  ^
+QUERY:  
+begin
+    <<outer>>
+    for a in 1..3 loop
+    <<sub>>
+    BEGIN
+        <<inner>>
+        for b in 8..9 loop
+            if a=2 then
+                continue sub;
+            end if;
+            raise notice '% %', a, b;
+        end loop inner;
+    END sub;
+    end loop outer;
+end;
+
+CONTEXT:  compilation of PL/pgSQL function "test_lab" near line 10
 select * from plpgsql_check_function('test_lab()', performance_warnings := true);
-                        plpgsql_check_function                        
-----------------------------------------------------------------------
- error:42601:10:CONTINUE:block label "sub" cannot be used in CONTINUE
-(1 row)
+                      plpgsql_check_function                       
+-------------------------------------------------------------------
+ error:42601:block label "sub" cannot be used in CONTINUE
+ Query: 
+        begin
+            <<outer>>
+            for a in 1..3 loop
+            <<sub>>
+            BEGIN
+                <<inner>>
+                for b in 8..9 loop
+                    if a=2 then
+                        continue sub;
+ --                              ^
+                    end if;
+                    raise notice '% %', a, b;
+                end loop inner;
+            END sub;
+            end loop outer;
+        end;
+        
+ Context: compilation of PL/pgSQL function "test_lab" near line 10
+(20 rows)
 
 create or replace function test_lab()
 returns void as $$
@@ -3197,12 +3230,26 @@ end;
 $$ language plpgsql;
 select test_lab();
 ERROR:  CONTINUE cannot be used outside a loop
-CONTEXT:  PL/pgSQL function test_lab()
+LINE 3:   continue;
+          ^
+QUERY:  
+begin
+  continue;
+end;
+
+CONTEXT:  compilation of PL/pgSQL function "test_lab" near line 3
 select * from plpgsql_check_function('test_lab()', performance_warnings := true);
-                    plpgsql_check_function                     
----------------------------------------------------------------
- error:42601:3:CONTINUE:CONTINUE cannot be used outside a loop
-(1 row)
+                      plpgsql_check_function                      
+------------------------------------------------------------------
+ error:42601:CONTINUE cannot be used outside a loop
+ Query: 
+        begin
+          continue;
+ --       ^
+        end;
+        
+ Context: compilation of PL/pgSQL function "test_lab" near line 3
+(8 rows)
 
 create type _exception_type as (
   state text,
@@ -3229,9 +3276,9 @@ select f1();
 (1 row)
 
 select * from plpgsql_check_function('f1()');
-                        plpgsql_check_function                         
------------------------------------------------------------------------
- error:42703:7:GET DIAGNOSTICS:record "_exception" has no field "hint"
+                            plpgsql_check_function                             
+-------------------------------------------------------------------------------
+ error:42703:7:GET STACKED DIAGNOSTICS:record "_exception" has no field "hint"
 (1 row)
 
 drop function f1();
@@ -3448,7 +3495,7 @@ $$ language plpgsql;
 select * from plpgsql_check_function('f1()');
               plpgsql_check_function              
 --------------------------------------------------
- warning extra:00000:unmodified OUT variable "$1"
+ warning extra:00000:unmodified OUT variable "cr"
 (1 row)
 
 create or replace function f1(out cr refcursor)
@@ -3578,9 +3625,8 @@ select * from plpgsql_check_function('fx()');
                 plpgsql_check_function                
 ------------------------------------------------------
  error:42703:5:RAISE:record "var" has no field "hint"
- Query: SELECT var.hint
- --            ^
-(3 rows)
+ Context: SQL statement "SELECT var.hint"
+(2 rows)
 
 drop function fx();
 create or replace function foo_format(a text, b text)
@@ -3630,20 +3676,20 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('dyn_sql_1', security_warnings := true, fatal_errors := false);
-                                       plpgsql_check_function                                       
-----------------------------------------------------------------------------------------------------
- security:00000:8:EXECUTE statement:text type variable is not sanitized
+                                  plpgsql_check_function                                  
+------------------------------------------------------------------------------------------
+ security:00000:8:EXECUTE:text type variable is not sanitized
  Query: SELECT 'select ' || v
  --                         ^
  Detail: The EXECUTE expression is SQL injection vulnerable.
  Hint: Use quote_ident, quote_literal or format function to secure variable.
- security:00000:10:EXECUTE statement:text type variable is not sanitized
+ security:00000:10:EXECUTE:text type variable is not sanitized
  Query: SELECT format('select * from %s', v)
  --                                       ^
  Detail: The EXECUTE expression is SQL injection vulnerable.
  Hint: Use quote_ident, quote_literal or format function to secure variable.
- warning:00000:13:EXECUTE statement:values passed to EXECUTE statement by USING clause was not used
- error:42P02:14:EXECUTE statement:there is no parameter $1
+ warning:00000:13:EXECUTE:values passed to EXECUTE statement by USING clause was not used
+ error:42P02:14:EXECUTE:there is no parameter $1
  Query: select $1
  --            ^
 (14 rows)
@@ -3664,9 +3710,9 @@ begin
 end;
 $$ language plpgsql;
 select * from plpgsql_check_function('dyn_sql_2', security_warnings := true);
-                        plpgsql_check_function                        
-----------------------------------------------------------------------
- error:42703:9:EXECUTE statement:column "c" not found in data type tp
+                   plpgsql_check_function                   
+------------------------------------------------------------
+ error:42703:9:EXECUTE:column "c" not found in data type tp
  Query: select $1.c
  --            ^
 (3 rows)
@@ -3698,11 +3744,11 @@ ERROR:  could not identify column "a" in record data type
 LINE 1: select $1.a + $1.b
                ^
 QUERY:  select $1.a + $1.b
-CONTEXT:  PL/pgSQL function dyn_sql_2() line 8 at EXECUTE statement
+CONTEXT:  PL/pgSQL function dyn_sql_2() line 8 at EXECUTE
 select * from plpgsql_check_function('dyn_sql_2', security_warnings := true);
-                              plpgsql_check_function                               
------------------------------------------------------------------------------------
- error:42703:8:EXECUTE statement:could not identify column "a" in record data type
+                         plpgsql_check_function                          
+-------------------------------------------------------------------------
+ error:42703:8:EXECUTE:could not identify column "a" in record data type
  Query: select $1.a + $1.b
  --            ^
 (3 rows)
@@ -3760,10 +3806,10 @@ end
 $$ language plpgsql;
 -- raise a error
 select * from plpgsql_check_function('dyn_sql_3');
-                                      plpgsql_check_function                                       
----------------------------------------------------------------------------------------------------
- warning:00000:4:EXECUTE statement:values passed to EXECUTE statement by USING clause was not used
- error:XX000:4:EXECUTE statement:expression does not return data
+                                 plpgsql_check_function                                  
+-----------------------------------------------------------------------------------------
+ warning:00000:4:EXECUTE:values passed to EXECUTE statement by USING clause was not used
+ error:XX000:4:EXECUTE:expression does not return data
 (2 rows)
 
 create or replace function dyn_sql_3()
@@ -3776,10 +3822,10 @@ end
 $$ language plpgsql;
 -- raise a error
 select * from plpgsql_check_function('dyn_sql_3');
-                                      plpgsql_check_function                                       
----------------------------------------------------------------------------------------------------
- warning:00000:4:EXECUTE statement:values passed to EXECUTE statement by USING clause was not used
- warning:00000:4:EXECUTE statement:too few attributes for target variables
+                                 plpgsql_check_function                                  
+-----------------------------------------------------------------------------------------
+ warning:00000:4:EXECUTE:values passed to EXECUTE statement by USING clause was not used
+ warning:00000:4:EXECUTE:too few attributes for target variables
  Detail: There are more target variables than output columns in query.
  Hint: Check target variables in SELECT INTO statement.
 (4 rows)
@@ -3961,12 +4007,12 @@ $$ language plpgsql;
 select * from plpgsql_check_function('foo', security_warnings := true);
                            plpgsql_check_function                            
 -----------------------------------------------------------------------------
- security:00000:4:EXECUTE statement:text type variable is not sanitized
+ security:00000:4:EXECUTE:text type variable is not sanitized
  Query: SELECT 'select ' || a
  --                         ^
  Detail: The EXECUTE expression is SQL injection vulnerable.
  Hint: Use quote_ident, quote_literal or format function to secure variable.
- security:00000:8:EXECUTE statement:text type variable is not sanitized
+ security:00000:8:EXECUTE:text type variable is not sanitized
  Query: SELECT 'select ' || a
  --                         ^
  Detail: The EXECUTE expression is SQL injection vulnerable.
@@ -7145,3 +7191,196 @@ select lineno, stmt_lineno, exec_stmts, source from plpgsql_profiler_function_tb
    1046 |             |            | end;
 (1046 rows)
 
+create table testr(a int);
+create rule testr_rule as on insert to testr do nothing;
+create or replace function fx_testr()
+returns void as $$
+begin
+  insert into testr values(20);
+end;
+$$ language plpgsql;
+-- allow some rules on tables
+select fx_testr();
+ fx_testr 
+----------
+ 
+(1 row)
+
+select * from plpgsql_check_function_tb('fx_testr');
+ functionid | lineno | statement | sqlstate | message | detail | hint | level | position | query | context 
+------------+--------+-----------+----------+---------+--------+------+-------+----------+-------+---------
+(0 rows)
+
+drop function fx_testr();
+drop table testr;
+-- coverage tests
+set plpgsql_check.profiler to on;
+create or replace function covtest(int)
+returns int as $$
+declare a int = $1;
+begin
+  a := a + 1;
+  if a < 10 then
+    a := a + 1;
+  end if;
+  a := a + 1;
+  return a;
+end;
+$$ language plpgsql;
+set plpgsql_check.profiler to on;
+select covtest(10);
+ covtest 
+---------
+      12
+(1 row)
+
+select stmtid, exec_stmts, stmtname from plpgsql_profiler_function_statements_tb('covtest');
+ stmtid | exec_stmts |    stmtname     
+--------+------------+-----------------
+      0 |          1 | statement block
+      1 |          1 | assignment
+      2 |          1 | IF
+      3 |          0 | assignment
+      4 |          1 | assignment
+      5 |          1 | RETURN
+(6 rows)
+
+select plpgsql_coverage_statements('covtest');
+ plpgsql_coverage_statements 
+-----------------------------
+           0.833333333333333
+(1 row)
+
+select plpgsql_coverage_branches('covtest');
+ plpgsql_coverage_branches 
+---------------------------
+                       0.5
+(1 row)
+
+select covtest(1);
+ covtest 
+---------
+       4
+(1 row)
+
+select stmtid, exec_stmts, stmtname from plpgsql_profiler_function_statements_tb('covtest');
+ stmtid | exec_stmts |    stmtname     
+--------+------------+-----------------
+      0 |          2 | statement block
+      1 |          2 | assignment
+      2 |          2 | IF
+      3 |          1 | assignment
+      4 |          2 | assignment
+      5 |          2 | RETURN
+(6 rows)
+
+select plpgsql_coverage_statements('covtest');
+ plpgsql_coverage_statements 
+-----------------------------
+                           1
+(1 row)
+
+select plpgsql_coverage_branches('covtest');
+ plpgsql_coverage_branches 
+---------------------------
+                         1
+(1 row)
+
+set plpgsql_check.profiler to off;
+create or replace function f() returns void as $$
+declare
+  r1 record;
+  r2 record;
+begin
+  select 10 as a, 20 as b into r1;
+  r2 := json_populate_record(r1, '{}');
+  raise notice '%', r2.a;
+end;
+$$ language plpgsql;
+select * from plpgsql_check_function('f');
+ plpgsql_check_function 
+------------------------
+(0 rows)
+
+-- fix issue #63
+create or replace function distinct_array(arr anyarray) returns anyarray as $$
+begin
+  return array(select distinct e from unnest(arr) as e);
+end;
+$$ language plpgsql immutable;
+select plpgsql_check_function('distinct_array(anyarray)');
+ plpgsql_check_function 
+------------------------
+(0 rows)
+
+drop function distinct_array(anyarray);
+-- tracer test
+set plpgsql_check.enable_tracer to on;
+set plpgsql_check.tracer to on;
+set plpgsql_check.tracer_test_mode = true;
+\set VERBOSITY terse
+create or replace function fxo(a int, b int, c date, d numeric)
+returns void as $$
+begin
+  insert into tracer_tab values(a,b,c,d);
+end;
+$$ language plpgsql;
+create table tracer_tab(a int, b int, c date, d numeric);
+create or replace function tracer_tab_trg_fx()
+returns trigger as $$
+begin
+  return new;
+end;
+$$ language plpgsql;
+create trigger tracer_tab_trg before insert on tracer_tab for each row execute procedure tracer_tab_trg_fx();
+select fxo(10,20,'20200815', 3.14);
+NOTICE:  #0   ->> start of function fxo(integer,integer,date,numeric) (oid=0)
+NOTICE:  #0       "a" => '10', "b" => '20', "c" => '08-15-2020', "d" => '3.14'
+NOTICE:  #2     ->> start of function tracer_tab_trg_fx() (oid=0)
+NOTICE:  #2          call by fxo(integer,integer,date,numeric) line 3 at SQL statement
+NOTICE:  #2         triggered by before row insert trigger
+NOTICE:  #2         "new" => '(10,20,08-15-2020,3.14)'
+NOTICE:  #2     <<- end of function tracer_tab_trg_fx (elapsed time=0.010 ms)
+NOTICE:  #0   <<- end of function fxo (elapsed time=0.010 ms)
+ fxo 
+-----
+ 
+(1 row)
+
+select fxo(11,21,'20200816', 6.28);
+NOTICE:  #0   ->> start of function fxo(integer,integer,date,numeric) (oid=0)
+NOTICE:  #0       "a" => '11', "b" => '21', "c" => '08-16-2020', "d" => '6.28'
+NOTICE:  #2     ->> start of function tracer_tab_trg_fx() (oid=0)
+NOTICE:  #2          call by fxo(integer,integer,date,numeric) line 3 at SQL statement
+NOTICE:  #2         triggered by before row insert trigger
+NOTICE:  #2         "new" => '(11,21,08-16-2020,6.28)'
+NOTICE:  #2     <<- end of function tracer_tab_trg_fx (elapsed time=0.010 ms)
+NOTICE:  #0   <<- end of function fxo (elapsed time=0.010 ms)
+ fxo 
+-----
+ 
+(1 row)
+
+set plpgsql_check.enable_tracer to off;
+set plpgsql_check.tracer to off;
+drop table tracer_tab cascade;
+drop function tracer_tab_trg_fx();
+drop function fxo(int, int, date, numeric);
+create or replace function foo_trg_func()
+returns trigger as $$
+begin
+  -- bad function, RETURN is missing
+end;
+$$ language plpgsql;
+create table foo(a int);
+create trigger foo_trg before insert for each row execute procedure foo_trg_func();
+ERROR:  syntax error at or near "for" at character 38
+-- should to print error
+select * from plpgsql_check_function('foo_trg_func', 'foo');
+                   plpgsql_check_function                   
+------------------------------------------------------------
+ error:2F005:control reached end of function without RETURN
+(1 row)
+
+drop table foo;
+drop function foo_trg_func();

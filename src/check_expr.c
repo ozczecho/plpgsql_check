@@ -5,7 +5,7 @@
  *			  routines for enforce plans for every expr/query and
  *			  related checks over these plans.
  *
- * by Pavel Stehule 2013-2018
+ * by Pavel Stehule 2013-2020
  *
  *-------------------------------------------------------------------------
  */
@@ -13,6 +13,7 @@
 #include "plpgsql_check.h"
 
 #include "access/tupconvert.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "executor/spi_priv.h"
@@ -28,9 +29,9 @@
 #include "utils/lsyscache.h"
 
 static void collect_volatility(PLpgSQL_checkstate *cstate, Query *query);
-static Query * ExprGetQuery(PLpgSQL_expr *expr);
+static Query * ExprGetQuery(PLpgSQL_checkstate *cstate, PLpgSQL_expr *expr);
 
-static CachedPlan * get_cached_plan(PLpgSQL_expr *expr, bool *has_result_desc);
+static CachedPlan * get_cached_plan(PLpgSQL_checkstate *cstate, PLpgSQL_expr *expr, bool *has_result_desc);
 static void plan_checks(PLpgSQL_checkstate *cstate, CachedPlan *cplan, char *query_str);
 static void prohibit_write_plan(PLpgSQL_checkstate *cstate, CachedPlan *cplan, char *query_str);
 static void prohibit_transaction_stmt(PLpgSQL_checkstate *cstate, CachedPlan *cplan, char *query_str);
@@ -61,6 +62,8 @@ prepare_plan(PLpgSQL_checkstate *cstate,
 
 	if (expr->plan == NULL)
 	{
+		MemoryContext old_cxt;
+
 		/*
 		 * The grammar can't conveniently set expr->func while building the parse
 		 * tree, so make sure it's set before parser hooks need it.
@@ -71,7 +74,7 @@ prepare_plan(PLpgSQL_checkstate *cstate,
 		 * Generate and save the plan
 		 */
 		plan = SPI_prepare_params(expr->query,
-								  parser_setup ? parser_setup : (ParserSetupHook) plpgsql_parser_setup,
+								  parser_setup ? parser_setup : (ParserSetupHook) plpgsql_check__parser_setup_p,
 								  arg ? arg : (void *) expr,
 								  cursorOptions);
 
@@ -100,19 +103,21 @@ prepare_plan(PLpgSQL_checkstate *cstate,
 		}
 
 		/*
-		 * We would to check all plans, but when plan exists, then don't 
-		 * overwrite existing plan.
+		 * Save prepared plan to plpgsql_check state context. It will be
+		 * released on end of check, and it should be valid to this time.
 		 */
-		if (expr->plan == NULL)
-		{
-			expr->plan = SPI_saveplan(plan);
-			cstate->exprs = lappend(cstate->exprs, expr);
-		}
+		old_cxt = MemoryContextSwitchTo(cstate->check_cxt);
+		expr->plan = SPI_saveplan(plan);
+
+		/* This plan should be released later */
+		cstate->exprs = lappend(cstate->exprs, expr);
+
+		MemoryContextSwitchTo(old_cxt);
 
 		SPI_freeplan(plan);
 	}
 
-	query = ExprGetQuery(expr);
+	query = ExprGetQuery(cstate, expr);
 
 	/* there checks are common on every expr/query */
 	plpgsql_check_funcexpr(cstate, query, expr->query);
@@ -136,9 +141,9 @@ collect_volatility(PLpgSQL_checkstate *cstate, Query *query)
 		if (!query->hasModifyingCTE && !query->hasForUpdate)
 		{
 			/* there is chance so query will be immutable */
-			if (contain_volatile_functions((Node *) query))
+			if (plpgsql_check_contain_volatile_functions((Node *) query, cstate))
 				cstate->volatility = PROVOLATILE_VOLATILE;
-			else if (!contain_mutable_functions((Node *) query))
+			else if (!plpgsql_check_contain_mutable_functions((Node *) query, cstate))
 			{
 				/*
 				 * when level is still immutable, check if there
@@ -162,28 +167,151 @@ collect_volatility(PLpgSQL_checkstate *cstate, Query *query)
 }
 
 /*
- * Returns Query node for expression
- *
+ * Validate plan and returns related node.
  */
-static Query *
-ExprGetQuery(PLpgSQL_expr *expr)
+CachedPlanSource *
+plpgsql_check_get_plan_source(PLpgSQL_checkstate *cstate, SPIPlanPtr plan)
 {
 	CachedPlanSource *plansource;
-	Query *result;
-	SPIPlanPtr	plan = expr->plan;
 
 	if (plan == NULL || plan->magic != _SPI_PLAN_MAGIC)
 		elog(ERROR, "cached plan is not valid plan");
 
+	cstate->has_mp = false;
+
 	if (list_length(plan->plancache_list) != 1)
-		elog(ERROR, "plan is not single execution plan");
+	{
+		/*
+		 * We can allow multiple plans for commands executed by
+		 * EXECUTE command. Result of last plan is result. But
+		 * it can be allowed only in main query - not in parameters.
+		 */
+		if (cstate->allow_mp)
+		{
+			/* take last */
+			plansource = (CachedPlanSource *) llast(plan->plancache_list);
+			cstate->has_mp = true;
+		}
+		else
+			elog(ERROR, "plan is not single execution planyy");
+	}
+	else
+		plansource = (CachedPlanSource *) linitial(plan->plancache_list);
 
-	plansource = (CachedPlanSource *) linitial(plan->plancache_list);
+	return plansource;
+}
 
-	if (list_length(plansource->query_list) != 1)
-		elog(ERROR, "there is not single query");
+/*
+ * Returns Query node for expression
+ *
+ */
+static Query *
+ExprGetQuery(PLpgSQL_checkstate *cstate, PLpgSQL_expr *expr)
+{
+	CachedPlanSource *plansource;
+	Query *result = NULL;
 
-	result = linitial(plansource->query_list);
+	plansource = plpgsql_check_get_plan_source(cstate, expr->plan);
+
+	/*
+	 * query_list has more fields, when rules are used. There
+	 * can be combination INSERT; NOTIFY
+	 */
+	if (list_length(plansource->query_list) > 1)
+	{
+		ListCell   *lc;
+		CmdType		first_ctype = CMD_UNKNOWN;
+		bool		first = true;
+
+		foreach (lc, plansource->query_list)
+		{
+			Query	   *query = (Query *) lfirst(lc);
+
+			if (first)
+			{
+				first = false;
+				first_ctype = query->commandType;
+				result = query;
+			}
+			else
+			{
+				/*
+				 * When current command is SELECT, then first command
+				 * should be SELECT too
+				 */
+				if (query->commandType == CMD_SELECT)
+				{
+					if (first_ctype != CMD_SELECT)
+						ereport(ERROR,
+								(errmsg("there is not single query"),
+								 errdetail("plpgsql_check cannot detect result type"),
+								 errhint("Probably there are some unsupported (by plpgsql_check) rules on related tables")));
+
+					result = query;
+				}
+			}
+		}
+	}
+	else
+		result = linitial(plansource->query_list);
+
+	cstate->was_pragma = false;
+
+	/* the test of PRAGMA function call */
+	if (result->commandType == CMD_SELECT)
+	{
+
+#if PG_VERSION_NUM < 100000
+
+		if (plansource->raw_parse_tree &&
+			IsA(plansource->raw_parse_tree, SelectStmt))
+		{
+			SelectStmt *selectStmt = (SelectStmt *) plansource->raw_parse_tree;
+
+#else
+
+		if (plansource->raw_parse_tree &&
+			plansource->raw_parse_tree->stmt &&
+			IsA(plansource->raw_parse_tree->stmt, SelectStmt))
+		{
+			SelectStmt *selectStmt = (SelectStmt *) plansource->raw_parse_tree->stmt;
+
+#endif
+			if (selectStmt->targetList && IsA(linitial(selectStmt->targetList), ResTarget))
+			{
+				ResTarget *rt = (ResTarget *) linitial(selectStmt->targetList);
+
+				if (rt->val && IsA(rt->val, FuncCall))
+				{
+					char	   *funcname;
+					char	   *schemaname;
+					FuncCall   *fc = (FuncCall *) rt->val;
+
+					DeconstructQualifiedName(fc->funcname, &schemaname, &funcname);
+
+					if (strcmp(funcname, "plpgsql_check_pragma") == 0)
+					{
+						ListCell	   *lc;
+
+						cstate->was_pragma = true;
+
+						foreach(lc, fc->args)
+						{
+							Node *arg = (Node *) lfirst(lc);
+
+							if (IsA(arg, A_Const))
+							{
+								A_Const *ac = (A_Const *) arg;
+
+								if (ac->val.type == T_String)
+									plpgsql_check_pragma_apply(cstate, strVal(&(ac->val)));
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 
 	return result;
 }
@@ -198,19 +326,13 @@ ExprGetQuery(PLpgSQL_expr *expr)
  *
  */
 static CachedPlan *
-get_cached_plan(PLpgSQL_expr *expr, bool *has_result_desc)
+get_cached_plan(PLpgSQL_checkstate *cstate, PLpgSQL_expr *expr, bool *has_result_desc)
 {
 	CachedPlanSource *plansource = NULL;
-	SPIPlanPtr	 plan = expr->plan;
 	CachedPlan	*cplan;
 
-	if (plan == NULL || plan->magic != _SPI_PLAN_MAGIC)
-		elog(ERROR, "cached plan is not valid plan");
+	plansource = plpgsql_check_get_plan_source(cstate, expr->plan);
 
-	if (list_length(plan->plancache_list) != 1)
-		elog(ERROR, "plan is not single execution plan");
-
-	plansource = (CachedPlanSource *) linitial(plan->plancache_list);
 	*has_result_desc = plansource->resultDesc ? true : false;
 
 #if PG_VERSION_NUM >= 100000
@@ -272,9 +394,20 @@ prohibit_write_plan(PLpgSQL_checkstate *cstate, CachedPlan *cplan, char *query_s
 			StringInfoData message;
 
 			initStringInfo(&message);
+
+#if PG_VERSION_NUM >= 130000
+
+			appendStringInfo(&message,
+					"%s is not allowed in a non volatile function",
+							GetCommandTagName(CreateCommandTag((Node *) pstmt)));
+
+#else
+
 			appendStringInfo(&message,
 					"%s is not allowed in a non volatile function",
 							CreateCommandTag((Node *) pstmt));
+
+#endif
 
 			plpgsql_check_put_error(cstate,
 					  ERRCODE_FEATURE_NOT_SUPPORTED, 0,
@@ -373,7 +506,7 @@ plpgsql_check_expr_get_node(PLpgSQL_checkstate *cstate, PLpgSQL_expr *expr, bool
 	Node	   *result = NULL;
 	bool		has_result_desc;
 
-	cplan = get_cached_plan(expr, &has_result_desc);
+	cplan = get_cached_plan(cstate, expr, &has_result_desc);
 	if (!has_result_desc)
 		elog(ERROR, "expression does not return data");
 
@@ -478,7 +611,7 @@ force_plan_checks(PLpgSQL_checkstate *cstate, PLpgSQL_expr *expr)
 	CachedPlan *cplan;
 	bool		has_result_desc;
 
-	cplan = get_cached_plan(expr, &has_result_desc);
+	cplan = get_cached_plan(cstate, expr, &has_result_desc);
 
 	/* do all checks for this plan, reduce a access to plan cache */
 	plan_checks(cstate, cplan, expr->query);
@@ -727,7 +860,7 @@ plpgsql_check_expr_as_rvalue(PLpgSQL_checkstate *cstate, PLpgSQL_expr *expr,
 	MemoryContext oldCxt = CurrentMemoryContext;
 	TupleDesc	tupdesc;
 	bool is_immutable_null;
-	bool			expand = true;
+	volatile bool expand = true;
 	Oid			first_level_typoid;
 	Oid expected_typoid = InvalidOid;
 	int expected_typmod = InvalidOid;
@@ -753,6 +886,14 @@ plpgsql_check_expr_as_rvalue(PLpgSQL_checkstate *cstate, PLpgSQL_expr *expr,
 		prepare_plan(cstate, expr, 0, NULL, NULL);
 		/* record all variables used by the query */
 		cstate->used_variables = bms_add_members(cstate->used_variables, expr->paramnos);
+
+		/*
+		 * there is a possibility to call a plpgsql_pragma like default for some aux
+		 * variable. When we detect this case, then we mark target variable as used
+		 * variable.
+		 */
+		if (cstate->was_pragma && targetdno != -1)
+			cstate->used_variables = bms_add_member(cstate->used_variables, targetdno);
 
 		tupdesc = plpgsql_check_expr_get_desc(cstate, expr, use_element_type, expand, is_expression, &first_level_typoid);
 		is_immutable_null = is_const_null_expr(cstate, expr);

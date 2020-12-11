@@ -83,6 +83,30 @@ select lineno, stmt_lineno, exec_stmts, source from plpgsql_profiler_function_tb
 
 drop function f1();
 
+-- test queryid retrieval
+create function f1()
+returns void as $$
+declare
+  t1 text = 't1';
+begin
+  insert into t1 values(10,20);
+  EXECUTE 'update ' ||  't1' || ' set a = 10';
+  EXECUTE 'delete from ' || t1;
+end;
+$$ language plpgsql;
+
+select plpgsql_profiler_reset_all();
+
+select plpgsql_profiler_install_fake_queryid_hook();
+
+select f1();
+
+select queryids, lineno, stmt_lineno, exec_stmts, source from plpgsql_profiler_function_tb('f1()');
+
+select plpgsql_profiler_remove_fake_queryid_hook();
+
+drop function f1();
+
 set plpgsql_check.profiler to off;
 
 create function f1()
@@ -3969,3 +3993,130 @@ set plpgsql_check.profiler = off;
 select longfx(10);
 
 select lineno, stmt_lineno, exec_stmts, source from plpgsql_profiler_function_tb('longfx');
+
+create table testr(a int);
+create rule testr_rule as on insert to testr do nothing;
+
+create or replace function fx_testr()
+returns void as $$
+begin
+  insert into testr values(20);
+end;
+$$ language plpgsql;
+
+-- allow some rules on tables
+select fx_testr();
+select * from plpgsql_check_function_tb('fx_testr');
+
+drop function fx_testr();
+drop table testr;
+
+-- coverage tests
+set plpgsql_check.profiler to on;
+
+create or replace function covtest(int)
+returns int as $$
+declare a int = $1;
+begin
+  a := a + 1;
+  if a < 10 then
+    a := a + 1;
+  end if;
+  a := a + 1;
+  return a;
+end;
+$$ language plpgsql;
+
+set plpgsql_check.profiler to on;
+
+select covtest(10);
+
+select stmtid, exec_stmts, stmtname from plpgsql_profiler_function_statements_tb('covtest');
+
+select plpgsql_coverage_statements('covtest');
+select plpgsql_coverage_branches('covtest');
+
+select covtest(1);
+
+select stmtid, exec_stmts, stmtname from plpgsql_profiler_function_statements_tb('covtest');
+
+select plpgsql_coverage_statements('covtest');
+select plpgsql_coverage_branches('covtest');
+
+set plpgsql_check.profiler to off;
+
+create or replace function f() returns void as $$
+declare
+  r1 record;
+  r2 record;
+begin
+  select 10 as a, 20 as b into r1;
+  r2 := json_populate_record(r1, '{}');
+  raise notice '%', r2.a;
+end;
+$$ language plpgsql;
+
+select * from plpgsql_check_function('f');
+
+-- fix issue #63
+create or replace function distinct_array(arr anyarray) returns anyarray as $$
+begin
+  return array(select distinct e from unnest(arr) as e);
+end;
+$$ language plpgsql immutable;
+
+select plpgsql_check_function('distinct_array(anyarray)');
+
+drop function distinct_array(anyarray);
+
+-- tracer test
+set plpgsql_check.enable_tracer to on;
+set plpgsql_check.tracer to on;
+set plpgsql_check.tracer_test_mode = true;
+
+\set VERBOSITY terse
+
+create or replace function fxo(a int, b int, c date, d numeric)
+returns void as $$
+begin
+  insert into tracer_tab values(a,b,c,d);
+end;
+$$ language plpgsql;
+
+create table tracer_tab(a int, b int, c date, d numeric);
+
+create or replace function tracer_tab_trg_fx()
+returns trigger as $$
+begin
+  return new;
+end;
+$$ language plpgsql;
+
+create trigger tracer_tab_trg before insert on tracer_tab for each row execute procedure tracer_tab_trg_fx();
+
+select fxo(10,20,'20200815', 3.14);
+select fxo(11,21,'20200816', 6.28);
+
+set plpgsql_check.enable_tracer to off;
+set plpgsql_check.tracer to off;
+
+drop table tracer_tab cascade;
+drop function tracer_tab_trg_fx();
+drop function fxo(int, int, date, numeric);
+
+create or replace function foo_trg_func()
+returns trigger as $$
+begin
+  -- bad function, RETURN is missing
+end;
+$$ language plpgsql;
+
+create table foo(a int);
+
+create trigger foo_trg before insert for each row execute procedure foo_trg_func();
+
+-- should to print error
+select * from plpgsql_check_function('foo_trg_func', 'foo');
+
+drop table foo;
+drop function foo_trg_func();
